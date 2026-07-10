@@ -1,0 +1,9 @@
+Django==5.1.4
+celery==5.4.0
+redis==5.2.1
+gunicorn==23.0.0
+pypdf==5.1.0
+pdf2docx==0.5.8
+PyMuPDF==1.25.1
+openpyxl==3.1.5
+python-pptx==1.0.2

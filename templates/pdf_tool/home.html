@@ -1,0 +1,18 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NFIU PDF</title>
+  <link rel="stylesheet" href="{% static 'pdf_tool/react/main.css' %}">
+</head>
+<body>
+  <div id="root"></div>
+  <script>
+    window.PDF_OPERATIONS = {{ operations_json|safe }};
+    window.PDF_OPERATION_GROUPS = {{ operation_groups_json|safe }};
+  </script>
+  <script type="module" src="{% static 'pdf_tool/react/app.js' %}"></script>
+</body>
+</html>
