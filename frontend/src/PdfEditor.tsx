@@ -48,8 +48,8 @@ export function PdfEditor({ file, onChange }: { file: File; onChange: (document:
   return (
     <section className="pdf-editor" aria-label="PDF editor">
       <div className="editor-toolbar">
-        <ToolButton label="Select / drag to rearrange" active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 /></ToolButton>
-        <ToolButton label="Add text" active={tool === "text"} onClick={() => setTool("text")}><Type /></ToolButton>
+        <ToolButton label="Select / drag to move or resize" active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 /></ToolButton>
+        <ToolButton label="Edit text (click existing text to edit it, or click empty space to add new text)" active={tool === "text"} onClick={() => setTool("text")}><Type /></ToolButton>
         <ToolButton label="Draw" active={tool === "draw"} onClick={() => setTool("draw")}><PenLine /></ToolButton>
         <ToolButton label="Add rectangle" active={tool === "rectangle"} onClick={() => setTool("rectangle")}><RectangleHorizontal /></ToolButton>
         <ToolButton label="Add circle" active={tool === "circle"} onClick={() => setTool("circle")}><Circle /></ToolButton>
@@ -71,6 +71,7 @@ export function PdfEditor({ file, onChange }: { file: File; onChange: (document:
             strokeWidth={strokeWidth}
             pendingSignature={pendingSignature}
             onSignaturePlaced={() => { setPendingSignature(null); setTool("select"); }}
+            onPlaced={() => setTool("select")}
             onChange={(objects) => updatePage(page, objects)}
           />
         ))}
@@ -80,7 +81,7 @@ export function PdfEditor({ file, onChange }: { file: File; onChange: (document:
   );
 }
 
-function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, onSignaturePlaced, onChange }: {
+function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, onSignaturePlaced, onPlaced, onChange }: {
   pdf: pdfjs.PDFDocumentProxy;
   pageIndex: number;
   tool: Tool;
@@ -88,12 +89,14 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
   strokeWidth: number;
   pendingSignature: SignatureData | null;
   onSignaturePlaced: () => void;
+  onPlaced: () => void;
   onChange: (objects: Record<string, unknown>[]) => void;
 }) {
   const baseRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const fabricRef = useRef<Canvas | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const [textHints, setTextHints] = useState<{ left: number; top: number; width: number; height: number }[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,6 +119,7 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
         const fontSize = Math.max(Math.hypot(transform[2], transform[3]), 8);
         return [{ text: item.str, left: transform[4], top: transform[5] - fontSize, width: Math.max(item.width * scale, 8), height: fontSize * 1.25, fontSize, fontFamily: textContent.styles[item.fontName]?.fontFamily || "Arial" }];
       });
+      setTextHints(extractedText.map(({ left, top, width: itemWidth, height: itemHeight }) => ({ left, top, width: itemWidth, height: itemHeight })));
       const editor = new Canvas(overlayRef.current, { width, height, selection: true, preserveObjectStacking: true });
       fabricRef.current = editor;
       const emit = () => onChange(editor.getObjects().map((object) => serializeObject(object, width, height)));
@@ -132,16 +136,19 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
           const source = extractedText.find((item) => point.x >= item.left - 6 && point.x <= item.left + item.width + 6 && point.y >= item.top - 6 && point.y <= item.top + item.height + 6);
           const text = new IText(source?.text || "Edit text", { left: source?.left ?? point.x, top: source?.top ?? point.y, width: source?.width || 180, fontSize: source?.fontSize || 18, fontFamily: source?.fontFamily || "Arial", fill: runtime.currentColor, backgroundColor: "#ffffff" });
           (text as any).annotationType = "text";
-          editor.add(text); editor.setActiveObject(text); text.enterEditing();
+          editor.add(text); editor.setActiveObject(text); text.enterEditing(); text.selectAll();
+          runtime.onPlaced?.();
         } else if (currentTool === "rectangle" || currentTool === "highlight") {
           const highlight = currentTool === "highlight";
           const rect = new Rect({ left: point.x, top: point.y, width: 160, height: highlight ? 24 : 90, fill: highlight ? "#fde047" : "transparent", opacity: highlight ? 0.38 : 1, stroke: highlight ? undefined : runtime.currentColor, strokeWidth: runtime.currentStrokeWidth });
           (rect as any).annotationType = highlight ? "highlight" : "rectangle";
           editor.add(rect); editor.setActiveObject(rect);
+          runtime.onPlaced?.();
         } else if (currentTool === "circle") {
           const circle = new FabricCircle({ left: point.x, top: point.y, radius: 45, fill: "transparent", stroke: runtime.currentColor, strokeWidth: runtime.currentStrokeWidth });
           (circle as any).annotationType = "circle";
           editor.add(circle); editor.setActiveObject(circle);
+          runtime.onPlaced?.();
         } else if (currentTool === "signature" && runtime.currentSignature) {
           const signature = runtime.currentSignature as SignatureData;
           const image = await FabricImage.fromURL(signature.image);
@@ -166,6 +173,7 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
     (editor as any).currentStrokeWidth = strokeWidth;
     (editor as any).currentSignature = pendingSignature;
     (editor as any).signaturePlaced = onSignaturePlaced;
+    (editor as any).onPlaced = onPlaced;
     editor.isDrawingMode = tool === "draw";
     if (editor.isDrawingMode) {
       const brush = new PencilBrush(editor);
@@ -176,7 +184,7 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
     editor.selection = tool === "select";
     editor.getObjects().forEach((object) => { object.selectable = tool === "select"; });
     editor.requestRenderAll();
-  }, [tool, color, strokeWidth, size, pendingSignature, onSignaturePlaced]);
+  }, [tool, color, strokeWidth, size, pendingSignature, onSignaturePlaced, onPlaced]);
 
   function removeSelected() {
     const editor = fabricRef.current;
@@ -188,9 +196,16 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
   return (
     <article className="editor-page" style={{ width: size.width || undefined }}>
       <div className="page-label">Page {pageIndex + 1}<button type="button" title="Delete selected" onClick={removeSelected}><Trash2 size={16} /></button></div>
-      <div className="page-canvas" style={{ width: size.width, height: size.height }}>
+      <div className="page-canvas" style={{ width: size.width, height: size.height, cursor: tool === "text" ? "text" : undefined }}>
         <canvas ref={baseRef} />
         <canvas ref={overlayRef} />
+        {tool === "text" && (
+          <div className="text-hint-layer">
+            {textHints.map((hint, index) => (
+              <div key={index} className="text-hint-box" style={{ left: hint.left, top: hint.top, width: hint.width, height: hint.height }} />
+            ))}
+          </div>
+        )}
       </div>
     </article>
   );

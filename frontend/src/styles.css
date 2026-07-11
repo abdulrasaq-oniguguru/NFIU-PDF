@@ -431,6 +431,18 @@ button {
   top: 0;
 }
 
+.text-hint-layer {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.text-hint-box {
+  border: 1.5px dashed #2d75dd;
+  border-radius: 2px;
+  position: absolute;
+}
+
 .dialog-backdrop {
   align-items: center;
   background: rgba(17, 24, 39, 0.55);
