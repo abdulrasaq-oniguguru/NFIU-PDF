@@ -5,6 +5,7 @@ from django.conf import settings
 from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from .models import AnnotationLayer, Job
@@ -12,64 +13,58 @@ from .tasks import process_job
 
 OPERATION_GROUPS = [
     {
-        "name": "Core PDF",
+        "name": "Organize PDF",
         "operations": [
-            {"id": "merge", "label": "Merge PDF", "multiple": True},
-            {"id": "split", "label": "Split PDF", "multiple": False},
-            {"id": "delete_pages", "label": "Delete Pages", "multiple": False},
-            {"id": "reorder_pages", "label": "Reorder Pages", "multiple": False},
-            {"id": "rotate", "label": "Rotate PDF", "multiple": False},
-            {"id": "crop", "label": "Crop PDF", "multiple": False},
+            {"id": "merge", "label": "Merge PDF", "multiple": True, "description": "Combine PDFs in the order you want with the easiest PDF merger available."},
+            {"id": "split", "label": "Split PDF", "multiple": False, "description": "Separate one page or a whole set for easy conversion into independent PDF files."},
+            {"id": "delete_pages", "label": "Delete Pages", "multiple": False, "description": "Remove unwanted pages from a PDF document in a few clicks."},
+            {"id": "reorder_pages", "label": "Reorder Pages", "multiple": False, "description": "Sort pages of your PDF file however you like."},
+            {"id": "crop", "label": "Crop PDF", "multiple": False, "description": "Crop margins of PDF documents or select specific areas, then apply the changes."},
         ],
     },
     {
-        "name": "Security",
+        "name": "Optimize PDF",
         "operations": [
-            {"id": "protect", "label": "Lock PDF", "multiple": False},
-            {"id": "unlock", "label": "Unlock PDF", "multiple": False},
+            {"id": "compress", "label": "Compress PDF", "multiple": False, "description": "Reduce file size while optimizing for maximal PDF quality."},
+            {"id": "ocr", "label": "OCR PDF", "multiple": False, "description": "Easily convert scanned PDF into searchable and selectable documents."},
         ],
     },
     {
-        "name": "Optimize",
+        "name": "Convert PDF",
         "operations": [
-            {"id": "compress", "label": "Compress PDF", "multiple": False},
+            {"id": "pdf_to_word", "label": "PDF to Word", "multiple": False, "description": "Convert your PDF files into easy to edit DOC and DOCX documents."},
+            {"id": "word_to_pdf", "label": "Word to PDF", "multiple": False, "description": "Make DOC and DOCX files easy to read by converting them to PDF."},
+            {"id": "pdf_to_excel", "label": "PDF to Excel", "multiple": False, "description": "Pull data straight from PDFs into Excel spreadsheets in a few short seconds."},
+            {"id": "excel_to_pdf", "label": "Excel to PDF", "multiple": False, "description": "Make Excel spreadsheets easy to read by converting them to PDF."},
+            {"id": "pdf_to_powerpoint", "label": "PDF to PowerPoint", "multiple": False, "description": "Turn your PDF files into easy to edit PPT and PPTX slideshows."},
+            {"id": "powerpoint_to_pdf", "label": "PowerPoint to PDF", "multiple": False, "description": "Make PPT and PPTX slideshows easy to view by converting them to PDF."},
+            {"id": "pdf_to_images", "label": "PDF to JPG", "multiple": False, "description": "Convert each PDF page into a JPG or extract all images contained in a PDF."},
+            {"id": "images_to_pdf", "label": "JPG to PDF", "multiple": True, "description": "Convert JPG images to PDF in seconds."},
+            {"id": "extract_images", "label": "Extract Images", "multiple": False, "description": "Pull every embedded image out of a PDF into a downloadable archive."},
         ],
     },
     {
-        "name": "From PDF",
+        "name": "Edit PDF",
         "operations": [
-            {"id": "pdf_to_word", "label": "PDF to Word", "multiple": False},
-            {"id": "pdf_to_excel", "label": "PDF to Excel", "multiple": False},
-            {"id": "pdf_to_powerpoint", "label": "PDF to PowerPoint", "multiple": False},
-            {"id": "pdf_to_images", "label": "PDF to Images", "multiple": False},
-            {"id": "extract_images", "label": "Extract Images", "multiple": False},
+            {"id": "edit", "label": "Edit & Sign PDF", "multiple": False, "description": "Add text, images, shapes or freehand annotations to a PDF document, or sign it."},
+            {"id": "watermark", "label": "Watermark", "multiple": False, "description": "Stamp text over your PDF in seconds. Choose the typography, transparency and position."},
+            {"id": "remove_watermark", "label": "Remove Watermark", "multiple": False, "description": "Detect and strip repeated diagonal text or stamped images from a PDF, from this tool or others."},
+            {"id": "page_numbers", "label": "Page Numbers", "multiple": False, "description": "Add page numbers into PDFs with ease."},
+            {"id": "rotate", "label": "Rotate PDF", "multiple": False, "description": "Rotate your PDFs the way you need them."},
         ],
     },
     {
-        "name": "To PDF",
+        "name": "PDF Security",
         "operations": [
-            {"id": "office_to_pdf", "label": "Office to PDF", "multiple": False},
-            {"id": "images_to_pdf", "label": "Images to PDF", "multiple": True},
-        ],
-    },
-    {
-        "name": "Editing",
-        "operations": [
-            {"id": "edit", "label": "Edit & Sign PDF", "multiple": False},
-            {"id": "watermark", "label": "Watermark", "multiple": False},
-            {"id": "page_numbers", "label": "Page Numbers", "multiple": False},
-        ],
-    },
-    {
-        "name": "OCR",
-        "operations": [
-            {"id": "ocr", "label": "OCR Searchable PDF", "multiple": False},
+            {"id": "protect", "label": "Protect PDF", "multiple": False, "description": "Protect PDF files with a password. Encrypt PDF documents to prevent unauthorized access."},
+            {"id": "unlock", "label": "Unlock PDF", "multiple": False, "description": "Remove PDF password security, giving you the freedom to use your PDFs as you want."},
         ],
     },
 ]
 OPERATIONS = [operation for group in OPERATION_GROUPS for operation in group["operations"]]
 
 
+@ensure_csrf_cookie
 def home(request):
     return render(
         request,

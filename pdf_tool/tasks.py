@@ -1,4 +1,5 @@
 import hashlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,9 +36,14 @@ def process_job(job_id: str) -> None:
         return
 
     job.status = Job.Status.DONE
-    job.result_name = result.name
+    job.result_name = build_result_name(files[0].name if files else "file", result)
     job.result_path = str(result.relative_to(settings.MEDIA_ROOT))
     job.save(update_fields=["status", "result_name", "result_path", "updated_at"])
+
+
+def build_result_name(original_filename: str, result: Path) -> str:
+    stem = Path(re.sub(r"^\d{3}_", "", original_filename)).stem
+    return f"{stem}_nfiu-pdf{result.suffix}"
 
 
 def append_signature_audits(job: Job, source: Path, result: Path) -> None:

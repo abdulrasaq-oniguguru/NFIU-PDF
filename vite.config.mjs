@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   root: "frontend",
+  base: "/static/pdf_tool/react/",
   build: {
     outDir: "../static/pdf_tool/react",
     emptyOutDir: true,

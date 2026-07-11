@@ -9,3 +9,9 @@ staticfiles/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.idea/
+ScreenShot/
+test_samples/
+base test pdf/
+images/
+nfiu logo.jpg

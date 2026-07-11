@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Canvas, FabricImage, IText, PencilBrush, Point, Rect, util } from "fabric";
+import { Canvas, Circle as FabricCircle, FabricImage, IText, PencilBrush, Point, Rect, util } from "fabric";
 import * as pdfjs from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { Highlighter, MousePointer2, PenLine, RectangleHorizontal, Signature, Trash2, Type } from "lucide-react";
+import { Circle, Eraser, Highlighter, MousePointer2, PenLine, RectangleHorizontal, Signature, Trash2, Type } from "lucide-react";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 export type AnnotationDocument = { version: 1; pages: AnnotationPage[] };
 type AnnotationPage = { page: number; objects: Record<string, unknown>[] };
-type Tool = "select" | "text" | "draw" | "rectangle" | "highlight" | "signature";
+type Tool = "select" | "text" | "draw" | "rectangle" | "circle" | "highlight" | "signature" | "erase";
 type SignatureData = { image: string; signerName: string; signerEmail: string; signedAt: string };
 
 export function PdfEditor({ file, onChange }: { file: File; onChange: (document: AnnotationDocument) => void }) {
@@ -48,12 +48,14 @@ export function PdfEditor({ file, onChange }: { file: File; onChange: (document:
   return (
     <section className="pdf-editor" aria-label="PDF editor">
       <div className="editor-toolbar">
-        <ToolButton label="Select" active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 /></ToolButton>
-        <ToolButton label="Replace text" active={tool === "text"} onClick={() => setTool("text")}><Type /></ToolButton>
+        <ToolButton label="Select / drag to rearrange" active={tool === "select"} onClick={() => setTool("select")}><MousePointer2 /></ToolButton>
+        <ToolButton label="Add text" active={tool === "text"} onClick={() => setTool("text")}><Type /></ToolButton>
         <ToolButton label="Draw" active={tool === "draw"} onClick={() => setTool("draw")}><PenLine /></ToolButton>
-        <ToolButton label="Rectangle" active={tool === "rectangle"} onClick={() => setTool("rectangle")}><RectangleHorizontal /></ToolButton>
+        <ToolButton label="Add rectangle" active={tool === "rectangle"} onClick={() => setTool("rectangle")}><RectangleHorizontal /></ToolButton>
+        <ToolButton label="Add circle" active={tool === "circle"} onClick={() => setTool("circle")}><Circle /></ToolButton>
         <ToolButton label="Highlight" active={tool === "highlight"} onClick={() => setTool("highlight")}><Highlighter /></ToolButton>
         <ToolButton label="Signature" active={tool === "signature"} onClick={() => setSignatureOpen(true)}><Signature /></ToolButton>
+        <ToolButton label="Eraser (click an item to remove it)" active={tool === "erase"} onClick={() => setTool("erase")}><Eraser /></ToolButton>
         <label className="color-control" title="Color"><input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label>
         <label className="stroke-control">Stroke <input type="range" min="1" max="12" value={strokeWidth} onChange={(event) => setStrokeWidth(Number(event.target.value))} /></label>
       </div>
@@ -134,8 +136,12 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
         } else if (currentTool === "rectangle" || currentTool === "highlight") {
           const highlight = currentTool === "highlight";
           const rect = new Rect({ left: point.x, top: point.y, width: 160, height: highlight ? 24 : 90, fill: highlight ? "#fde047" : "transparent", opacity: highlight ? 0.38 : 1, stroke: highlight ? undefined : runtime.currentColor, strokeWidth: runtime.currentStrokeWidth });
-          (rect as any).annotationType = currentTool;
+          (rect as any).annotationType = highlight ? "highlight" : "rectangle";
           editor.add(rect); editor.setActiveObject(rect);
+        } else if (currentTool === "circle") {
+          const circle = new FabricCircle({ left: point.x, top: point.y, radius: 45, fill: "transparent", stroke: runtime.currentColor, strokeWidth: runtime.currentStrokeWidth });
+          (circle as any).annotationType = "circle";
+          editor.add(circle); editor.setActiveObject(circle);
         } else if (currentTool === "signature" && runtime.currentSignature) {
           const signature = runtime.currentSignature as SignatureData;
           const image = await FabricImage.fromURL(signature.image);
@@ -143,6 +149,9 @@ function PdfPage({ pdf, pageIndex, tool, color, strokeWidth, pendingSignature, o
           (image as any).annotationType = "signature";
           (image as any).signatureData = signature;
           editor.add(image); editor.setActiveObject(image); runtime.signaturePlaced();
+        } else if (currentTool === "erase") {
+          const target = editor.findTarget(e);
+          if (target) editor.remove(target);
         }
       });
     });
@@ -192,7 +201,7 @@ function serializeObject(object: any, width: number, height: number): Record<str
   const bounds = object.getBoundingRect();
   const common = { type, x: bounds.left / width, y: bounds.top / height, width: bounds.width / width, height: bounds.height / height, color: object.stroke || object.fill || "#111827", opacity: object.opacity ?? 1, stroke_width: object.strokeWidth || 2 };
   if (type === "text") return { ...common, text: object.text, font_size: object.fontSize * (object.scaleY || 1), viewport_width: width, erase: true };
-  if (type === "highlight" || type === "rectangle") return { ...common, fill: object.fill === "transparent" ? null : object.fill };
+  if (type === "highlight" || type === "rectangle" || type === "circle") return { ...common, fill: object.fill === "transparent" ? null : object.fill };
   if (type === "signature") return { ...common, image: object.signatureData.image, signer_name: object.signatureData.signerName, signer_email: object.signatureData.signerEmail, signed_at: object.signatureData.signedAt };
   if (type === "path") {
     const matrix = object.calcTransformMatrix();

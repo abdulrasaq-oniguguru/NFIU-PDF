@@ -1,5 +1,12 @@
+import mimetypes
 import os
 from pathlib import Path
+
+# Python's mimetypes module doesn't know about .mjs (ES modules), so Django's
+# static file server falls back to text/plain. Browsers enforce strict MIME
+# checking on dynamic `import()` of modules (used by pdf.js's worker) and
+# reject anything that isn't a JS type, breaking the PDF preview/editor.
+mimetypes.add_type("text/javascript", ".mjs")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 

@@ -1,15 +1,33 @@
 import base64
+import hashlib
+import math
+import os
 import shutil
 import subprocess
 import zipfile
+from collections import defaultdict
 from pathlib import Path
 
 import fitz
+import pdf2docx.text.TextSpan as _pdf2docx_textspan
 from openpyxl import Workbook
 from pdf2docx import Converter
 from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfReader, PdfWriter
+
+# PyMuPDF's rebased backend (>=1.24) can return span colors as signed integers,
+# but pdf2docx's rgb_component() assumes unsigned 0-16777215 and crashes on
+# negative input (hex() of a negative int keeps the sign, breaking int(..., 16)).
+# Mask to 24 bits to recover the intended unsigned color before pdf2docx sees it.
+_original_rgb_component = _pdf2docx_textspan.rgb_component
+
+
+def _safe_rgb_component(srgb: int):
+    return _original_rgb_component(srgb & 0xFFFFFF)
+
+
+_pdf2docx_textspan.rgb_component = _safe_rgb_component
 
 PDF_EXTENSIONS = {".pdf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
@@ -174,6 +192,8 @@ def watermark_pdf(files: list[Path], output: Path, options: dict) -> Path:
     document = fitz.open(source)
     for page in document:
         rect = page.rect
+        center = fitz.Point(rect.width / 2, rect.height / 2)
+        morph = (center, fitz.Matrix(1, 1).prerotate(45))
         page.insert_textbox(
             rect,
             text,
@@ -181,12 +201,109 @@ def watermark_pdf(files: list[Path], output: Path, options: dict) -> Path:
             fontname="helv",
             color=(0.45, 0.45, 0.45),
             align=fitz.TEXT_ALIGN_CENTER,
-            rotate=45,
+            morph=morph,
             fill_opacity=0.18,
         )
     document.save(output)
     document.close()
     return output
+
+
+def remove_watermark_pdf(files: list[Path], output: Path, options: dict) -> Path:
+    source = single_pdf(files)
+    document = fitz.open(source)
+    page_count = len(document)
+    threshold = max(1, math.ceil(page_count * 0.6))
+
+    text_groups: dict[tuple[str, int], list[tuple[int, fitz.Quad]]] = defaultdict(list)
+    for page_index in range(page_count):
+        page = document[page_index]
+        min_dim = min(page.rect.width, page.rect.height)
+        raw = page.get_text("rawdict")
+        for block in raw.get("blocks", []):
+            for line in block.get("lines", []):
+                direction = line.get("dir", (1, 0))
+                angle = math.degrees(math.atan2(direction[1], direction[0]))
+                angle_mod = abs(angle) % 90
+                is_diagonal = min(angle_mod, 90 - angle_mod) > 5
+                for span in line.get("spans", []):
+                    chars = span.get("chars") or []
+                    text = "".join(c.get("c", "") for c in chars).strip()
+                    if not text:
+                        continue
+                    is_large = span.get("size", 0) > 0.05 * min_dim
+                    if is_diagonal or is_large:
+                        key = (text.lower(), round(angle))
+                        for quad in _char_quads(direction, span, chars):
+                            text_groups[key].append((page_index, quad))
+
+    image_groups: dict[str, list[tuple[int, fitz.Rect]]] = defaultdict(list)
+    for page_index in range(page_count):
+        page = document[page_index]
+        for image_info in page.get_images(full=True):
+            xref = image_info[0]
+            try:
+                image_bytes = document.extract_image(xref)["image"]
+            except Exception:
+                continue
+            digest = hashlib.md5(image_bytes).hexdigest()
+            for rect in page.get_image_rects(xref):
+                image_groups[digest].append((page_index, rect))
+
+    removed = 0
+    for occurrences in text_groups.values():
+        if len({page_index for page_index, _ in occurrences}) >= threshold:
+            for page_index, quad in occurrences:
+                document[page_index].add_redact_annot(quad)
+                removed += 1
+    for occurrences in image_groups.values():
+        if len({page_index for page_index, _ in occurrences}) >= threshold:
+            for page_index, rect in occurrences:
+                document[page_index].add_redact_annot(rect)
+                removed += 1
+
+    if removed == 0:
+        document.close()
+        raise OperationError("No watermark-like content was detected")
+
+    for page in document:
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE)
+
+    document.save(output, garbage=4, deflate=True)
+    document.close()
+    return output
+
+
+def _char_quads(direction, span: dict, chars: list[dict]) -> list[fitz.Quad]:
+    """Build tight per-character rotated quads from character origins.
+
+    MuPDF reports span['bbox'] as an axis-aligned box in device space, which
+    for rotated (e.g. diagonal watermark) text becomes far larger than the
+    visible glyphs and can bleed into unrelated content. Redacting one quad
+    per character (rather than one big quad for the whole run) keeps the
+    erased area as close as possible to the actual glyph strokes, minimizing
+    collateral damage where the watermark visually crosses other text.
+    """
+    dx, dy = direction
+    norm = math.hypot(dx, dy) or 1.0
+    dx, dy = dx / norm, dy / norm
+    px, py = -dy, dx
+    size = span.get("size", 10)
+    ascender = span.get("ascender", 0.8) * size
+    descender = span.get("descender", -0.2) * size
+    up = fitz.Point(px, py)
+    step = fitz.Point(dx, dy) * (size * 0.6)
+
+    quads = []
+    for index, char in enumerate(chars):
+        start = fitz.Point(char["origin"])
+        end = fitz.Point(chars[index + 1]["origin"]) if index + 1 < len(chars) else start + step
+        top_left = start + up * ascender
+        bottom_left = start + up * descender
+        top_right = end + up * ascender
+        bottom_right = end + up * descender
+        quads.append(fitz.Quad(top_left, top_right, bottom_left, bottom_right))
+    return quads
 
 
 def page_numbers_pdf(files: list[Path], output: Path, options: dict) -> Path:
@@ -310,10 +427,20 @@ def pdf_to_powerpoint(files: list[Path], output: Path, options: dict) -> Path:
     return output
 
 
-def office_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
+WORD_EXTENSIONS = {".doc", ".docx", ".odt"}
+EXCEL_EXTENSIONS = {".xls", ".xlsx", ".ods"}
+POWERPOINT_EXTENSIONS = {".ppt", ".pptx", ".odp"}
+
+
+def _office_to_pdf(files: list[Path], output: Path, allowed: set[str], label: str) -> Path:
     source = single_file(files)
-    if source.suffix.lower() not in OFFICE_EXTENSIONS:
-        raise OperationError(f"{source.name} is not an Office document")
+    if source.suffix.lower() not in allowed:
+        raise OperationError(f"{source.name} is not a {label} document")
+    if os.name == "nt" and source.suffix.lower() in WORD_EXTENSIONS | EXCEL_EXTENSIONS | POWERPOINT_EXTENSIONS:
+        try:
+            return _windows_office_to_pdf(source, output)
+        except (OperationError, subprocess.SubprocessError):
+            pass
     soffice = resolve_binary("soffice", "libreoffice")
     subprocess.run(
         [
@@ -332,6 +459,66 @@ def office_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
         raise OperationError("LibreOffice did not produce a PDF")
     generated.replace(output)
     return output
+
+
+def _windows_office_to_pdf(source: Path, output: Path) -> Path:
+    """Use an installed Microsoft Office application as the Windows PDF backend."""
+    powershell = shutil.which("powershell.exe") or str(
+        Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    suffix = source.suffix.lower()
+    if suffix in WORD_EXTENSIONS:
+        body = (
+            "$app=New-Object -ComObject Word.Application; $app.Visible=$false; "
+            "try {$doc=$app.Documents.Open($src); $doc.ExportAsFixedFormat($dst,17)} "
+            "finally {if($doc){$doc.Close($false)}; $app.Quit()}"
+        )
+    elif suffix in EXCEL_EXTENSIONS:
+        body = (
+            "$app=New-Object -ComObject Excel.Application; $app.Visible=$false; $app.DisplayAlerts=$false; "
+            "try {$book=$app.Workbooks.Open($src); $book.ExportAsFixedFormat(0,$dst)} "
+            "finally {if($book){$book.Close($false)}; $app.Quit()}"
+        )
+    elif suffix in POWERPOINT_EXTENSIONS:
+        body = (
+            "$app=New-Object -ComObject PowerPoint.Application; "
+            "try {$deck=$app.Presentations.Open($src,$true,$false,$false); $deck.SaveAs($dst,32)} "
+            "finally {if($deck){$deck.Close()}; $app.Quit()}"
+        )
+    else:
+        raise OperationError(f"No Microsoft Office PDF backend for {source.suffix}")
+
+    script = f"$src=$args[0]; $dst=$args[1]; $ErrorActionPreference='Stop'; {body}"
+    subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", script, str(source.resolve()), str(output.resolve())],
+        check=True,
+        timeout=120,
+        capture_output=True,
+        text=True,
+    )
+    if not output.exists():
+        raise OperationError("Microsoft Office did not produce a PDF")
+    return output
+
+
+def office_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
+    return _office_to_pdf(files, output, OFFICE_EXTENSIONS, "supported Office")
+
+
+def word_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
+    return _office_to_pdf(files, output, WORD_EXTENSIONS, "Word")
+
+
+def excel_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
+    return _office_to_pdf(files, output, EXCEL_EXTENSIONS, "Excel")
+
+
+def powerpoint_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
+    return _office_to_pdf(files, output, POWERPOINT_EXTENSIONS, "PowerPoint")
 
 
 def ocr_pdf(files: list[Path], output: Path, options: dict) -> Path:
@@ -386,6 +573,17 @@ def draw_annotation(page, item: dict) -> None:
         page.draw_rect(
             rect,
             color=color if kind == "rectangle" else None,
+            fill=fill,
+            width=max(float(item.get("stroke_width", 2)), 0.5),
+            stroke_opacity=opacity,
+            fill_opacity=opacity,
+        )
+    elif kind == "circle":
+        rect = normalized_rect(page, item)
+        fill = html_color(item.get("fill")) if item.get("fill") else None
+        page.draw_oval(
+            rect,
+            color=color,
             fill=fill,
             width=max(float(item.get("stroke_width", 2)), 0.5),
             stroke_opacity=opacity,
@@ -447,6 +645,32 @@ def resolve_binary(*names: str) -> str:
         path = shutil.which(name)
         if path:
             return path
+        if os.name == "nt":
+            for extension in (".com", ".exe", ".bat", ".cmd"):
+                path = shutil.which(f"{name}{extension}")
+                if path:
+                    return path
+
+    if os.name == "nt":
+        roots = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+        ]
+        candidates = []
+        for root in roots:
+            candidates.extend(
+                [
+                    root / "LibreOffice" / "program" / "soffice.com",
+                    root / "LibreOffice" / "program" / "soffice.exe",
+                    root / "Tesseract-OCR" / "tesseract.exe",
+                ]
+            )
+            candidates.extend(root.glob("gs/gs*/bin/gswin64c.exe"))
+            candidates.extend(root.glob("gs/gs*/bin/gswin32c.exe"))
+        requested = {name.lower() for name in names}
+        for candidate in candidates:
+            if candidate.exists() and candidate.stem.lower() in requested:
+                return str(candidate)
     raise OperationError(f"Missing system dependency: one of {', '.join(names)}")
 
 
@@ -498,6 +722,7 @@ OPERATIONS = {
     "protect": ("protected.pdf", protect_pdf),
     "unlock": ("unlocked.pdf", unlock_pdf),
     "watermark": ("watermarked.pdf", watermark_pdf),
+    "remove_watermark": ("watermark_removed.pdf", remove_watermark_pdf),
     "page_numbers": ("page_numbers.pdf", page_numbers_pdf),
     "extract_images": ("extracted_images.zip", extract_images),
     "images_to_pdf": ("images.pdf", images_to_pdf),
@@ -506,5 +731,8 @@ OPERATIONS = {
     "pdf_to_excel": ("converted.xlsx", pdf_to_excel),
     "pdf_to_powerpoint": ("converted.pptx", pdf_to_powerpoint),
     "office_to_pdf": ("converted.pdf", office_to_pdf),
+    "word_to_pdf": ("converted.pdf", word_to_pdf),
+    "excel_to_pdf": ("converted.pdf", excel_to_pdf),
+    "powerpoint_to_pdf": ("converted.pdf", powerpoint_to_pdf),
     "ocr": ("searchable.pdf", ocr_pdf),
 }
