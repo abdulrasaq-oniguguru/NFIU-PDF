@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from .models import Job, SignatureAuditLog
 from .operations import OperationError, run_operation
+from playwright.sync_api import Error as PlaywrightError
 
 
 @shared_task
@@ -29,7 +30,7 @@ def process_job(job_id: str) -> None:
         result = run_operation(job.operation, files, output_dir, job.options)
         if job.operation == "edit":
             append_signature_audits(job, files[0], result)
-    except (OperationError, subprocess.CalledProcessError, OSError, ValueError) as exc:
+    except (OperationError, PlaywrightError, subprocess.CalledProcessError, OSError, ValueError) as exc:
         job.status = Job.Status.FAILED
         job.error = str(exc)
         job.save(update_fields=["status", "error", "updated_at"])

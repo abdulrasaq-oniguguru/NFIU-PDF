@@ -15,9 +15,11 @@ import {
   FileType,
   FileUp,
   Grid3X3,
+  Globe2,
   Image,
   Italic,
   LockOpen,
+  Monitor,
   Plus,
   RotateCw,
   Scissors,
@@ -27,12 +29,14 @@ import {
   Trash2,
   Underline,
   UploadCloud,
+  X,
 } from "lucide-react";
 import "./styles.css";
 import nfiuLogo from "./assets/nfiu-logo.jpg";
 import { AnnotationDocument, PdfEditor } from "./PdfEditor";
 import { FileThumbnails, PageThumbnails, SingleFilePreview } from "./PdfThumbnails";
 import { CropSelection, PdfCropper } from "./PdfCropper";
+import { ImageExtractGallery } from "./ImageExtractGallery";
 
 type Operation = {
   id: string;
@@ -62,6 +66,7 @@ declare global {
 }
 
 const optionVisibility: Record<string, string[]> = {
+  html_to_pdf: [],
   split: ["every"],
   delete_pages: ["pages"],
   reorder_pages: ["pages", "keep_remaining"],
@@ -119,6 +124,7 @@ const toolIcons: Record<string, React.ElementType> = {
   page_numbers: FileText,
   ocr: ShieldCheck,
   edit: Edit3,
+  html_to_pdf: Globe2,
 };
 
 const toolColors: Record<string, string> = {
@@ -146,6 +152,7 @@ const toolColors: Record<string, string> = {
   page_numbers: "blue",
   ocr: "red",
   edit: "green",
+  html_to_pdf: "blue",
 };
 
 function App() {
@@ -162,6 +169,7 @@ function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [annotations, setAnnotations] = useState<AnnotationDocument>({ version: 1, pages: [] });
   const [crop, setCrop] = useState<CropSelection>({ x: 0, y: 0, width: 0, height: 0, page: 1, scope: "all" });
+  const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
   const [options, setOptions] = useState({
     password: "",
     degrees: "90",
@@ -185,6 +193,12 @@ function App() {
     page_number_italic: "false",
     page_number_underline: "false",
     page_number_color: "#1a1f2b",
+    url: "",
+    screen_width: "1440",
+    page_size: "A4",
+    orientation: "portrait",
+    one_long_page: "false",
+    print_background: "true",
   });
 
   const selected = useMemo(
@@ -193,7 +207,8 @@ function App() {
   );
 
   const visibleOptions = optionVisibility[selectedId] ?? [];
-  const needsWorkspace = visibleOptions.length > 0 || selected.multiple || selectedId === "edit" || selectedId === "crop";
+  const needsWorkspace =
+    visibleOptions.length > 0 || selected.multiple || selectedId === "edit" || selectedId === "crop" || selectedId === "extract_images";
   const visibleTools = useMemo(() => {
     if (activeCategory === "All") return operations;
     const group = groups.find((candidate) => candidate.name === activeCategory);
@@ -207,6 +222,7 @@ function App() {
     setStatus("Idle");
     setFiles([]);
     setAnnotations({ version: 1, pages: [] });
+    setSelectedImageIds([]);
     setScreen("tool");
   }
 
@@ -217,6 +233,7 @@ function App() {
     setStatus("Idle");
     setFiles([]);
     setAnnotations({ version: 1, pages: [] });
+    setSelectedImageIds([]);
   }
 
   function resetToUpload() {
@@ -225,6 +242,7 @@ function App() {
     setStatus("Idle");
     setFiles([]);
     setAnnotations({ version: 1, pages: [] });
+    setSelectedImageIds([]);
   }
 
   function handleFiles(event: ChangeEvent<HTMLInputElement>) {
@@ -241,13 +259,17 @@ function App() {
   }
 
   async function runJob(fileList: File[]) {
-    if (!fileList.length) {
+    if (!fileList.length && selectedId !== "html_to_pdf") {
       setError("Select at least one file");
       setStatus("Waiting for file");
       return;
     }
     if (selectedId === "crop" && (crop.width <= 0 || crop.height <= 0)) {
       setError("Draw a crop selection first");
+      return;
+    }
+    if (selectedId === "extract_images" && selectedImageIds.length === 0) {
+      setError("Select at least one image to extract");
       return;
     }
     setIsProcessing(true);
@@ -257,7 +279,18 @@ function App() {
 
     const formData = new FormData();
     formData.set("operation", selectedId);
-    formData.set("options", JSON.stringify(selectedId === "edit" ? { ...options, annotations } : selectedId === "crop" ? { ...options, crop } : options));
+    formData.set(
+      "options",
+      JSON.stringify(
+        selectedId === "edit"
+          ? { ...options, annotations }
+          : selectedId === "crop"
+            ? { ...options, crop }
+            : selectedId === "extract_images"
+              ? { ...options, selected_images: selectedImageIds }
+              : options,
+      ),
+    );
     fileList.forEach((file) => formData.append("files", file));
 
     const response = await fetch("/jobs/", {
@@ -404,6 +437,14 @@ function App() {
               <h2>{titleCase(status)}&hellip;</h2>
               <p className="subtitle">Processing {selected.label.toLowerCase()} on the server</p>
             </div>
+          ) : selectedId === "html_to_pdf" ? (
+            <HtmlToPdfWorkspace
+              options={options}
+              error={error}
+              status={status}
+              updateOption={updateOption}
+              convert={() => runJob([])}
+            />
           ) : files.length === 0 ? (
             <div className="upload-card">
               <div className="drop-box">
@@ -438,6 +479,8 @@ function App() {
               <div className="workspace-main">
                 {selectedId === "crop" ? (
                   <PdfCropper file={files[0]} value={crop} onChange={setCrop} />
+                ) : selectedId === "extract_images" ? (
+                  <ImageExtractGallery file={files[0]} selectedIds={selectedImageIds} onChange={setSelectedImageIds} />
                 ) : selected.multiple ? (
                   <FileThumbnails files={files} />
                 ) : pageLevelTools.has(selectedId) ? (
@@ -690,7 +733,11 @@ function App() {
 
                 <div className="sidebar-spacer" />
                 <span className={error ? "status error" : "status"}>{error || status}</span>
-                <button type="button" onClick={() => runJob(files)} disabled={isProcessing}>
+                <button
+                  type="button"
+                  onClick={() => runJob(files)}
+                  disabled={isProcessing || (selectedId === "extract_images" && selectedImageIds.length === 0)}
+                >
                   {selected.label}
                 </button>
               </aside>
@@ -703,6 +750,88 @@ function App() {
         <span>NFIU PDF &mdash; LAN only | Temporary job files | Configurable cleanup</span>
       </footer>
     </main>
+  );
+}
+
+type HtmlOptions = {
+  url: string;
+  screen_width: string;
+  page_size: string;
+  orientation: string;
+  one_long_page: string;
+  print_background: string;
+};
+
+function HtmlToPdfWorkspace({
+  options,
+  error,
+  status,
+  updateOption,
+  convert,
+}: {
+  options: HtmlOptions;
+  error: string;
+  status: string;
+  updateOption: (key: keyof HtmlOptions, value: string) => void;
+  convert: () => void;
+}) {
+  const [showDialog, setShowDialog] = useState(!options.url);
+  const [draftUrl, setDraftUrl] = useState(options.url);
+  const canUseUrl = /^https?:\/\//i.test(draftUrl.trim());
+
+  function addUrl() {
+    if (!canUseUrl) return;
+    updateOption("url", draftUrl.trim());
+    setShowDialog(false);
+  }
+
+  return (
+    <div className="html-workspace">
+      <div className="html-preview-shell">
+        {options.url ? (
+          <iframe title="Website preview" src={options.url} className="html-preview" sandbox="allow-scripts allow-same-origin" />
+        ) : (
+          <div className="html-preview-empty">
+            <Globe2 size={56} />
+            <h2>Add a webpage to begin</h2>
+            <p>Enter a public URL and configure exactly how it should become a PDF.</p>
+            <button type="button" onClick={() => setShowDialog(true)}>Add HTML</button>
+          </div>
+        )}
+        {options.url && <span className="preview-note">Live preview · Some websites may block embedded display</span>}
+      </div>
+
+      <aside className="html-sidebar">
+        <h2>HTML to PDF</h2>
+        <Field label="Website URL">
+          <div className="url-control"><Globe2 size={18} /><input value={options.url} readOnly /><button type="button" aria-label="Change URL" onClick={() => { setDraftUrl(options.url); setShowDialog(true); }}><RotateCw size={18} /></button></div>
+        </Field>
+        <Field label="Screen size">
+          <select value={options.screen_width} onChange={(event) => updateOption("screen_width", event.target.value)}>
+            <option value="375">Mobile (375px)</option><option value="768">Tablet (768px)</option><option value="1280">Desktop (1280px)</option><option value="1440">Wide desktop (1440px)</option><option value="1920">Full HD (1920px)</option>
+          </select>
+        </Field>
+        <Field label="Page size">
+          <select value={options.page_size} onChange={(event) => updateOption("page_size", event.target.value)}>
+            <option value="A4">A4 (297 × 210 mm)</option><option value="Letter">Letter (11 × 8.5 in)</option><option value="Legal">Legal (14 × 8.5 in)</option>
+          </select>
+        </Field>
+        <label className="html-check"><input type="checkbox" checked={options.one_long_page === "true"} onChange={(event) => updateOption("one_long_page", event.target.checked ? "true" : "false")} /><span>One long page<small>Capture the webpage without page breaks</small></span></label>
+        <div className="orientation-field"><span>Orientation</span><div className="orientation-grid">
+          {["portrait", "landscape"].map((value) => <button type="button" key={value} className={options.orientation === value ? "active" : ""} onClick={() => updateOption("orientation", value)}><Monitor size={28} className={value} />{titleCase(value)}</button>)}
+        </div></div>
+        <label className="html-check"><input type="checkbox" checked={options.print_background === "true"} onChange={(event) => updateOption("print_background", event.target.checked ? "true" : "false")} /><span>Print backgrounds</span></label>
+        <div className="sidebar-spacer" /><span className={error ? "status error" : "status"}>{error || status}</span>
+        <button type="button" className="html-convert" disabled={!options.url} onClick={convert}>Convert to PDF <Download size={19} /></button>
+      </aside>
+
+      {showDialog && <div className="dialog-backdrop"><div className="html-dialog" role="dialog" aria-modal="true" aria-labelledby="html-dialog-title">
+        <div className="dialog-heading"><h2 id="html-dialog-title">Add HTML to convert from</h2>{options.url && <button type="button" aria-label="Close" onClick={() => setShowDialog(false)}><X size={22} /></button>}</div>
+        <div className="html-dialog-tab">URL</div>
+        <Field label="Write the website URL"><div className="url-control dialog-url"><Globe2 size={19} /><input autoFocus placeholder="Example: https://example.com" value={draftUrl} onChange={(event) => setDraftUrl(event.target.value)} onKeyDown={(event) => event.key === "Enter" && addUrl()} /></div></Field>
+        <div className="html-dialog-footer"><button type="button" disabled={!canUseUrl} onClick={addUrl}>Add</button></div>
+      </div></div>}
+    </div>
   );
 }
 

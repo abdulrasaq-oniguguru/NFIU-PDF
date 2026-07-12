@@ -2,6 +2,8 @@ import base64
 import hashlib
 import math
 import os
+import ipaddress
+import socket
 import shutil
 import subprocess
 import zipfile
@@ -15,6 +17,7 @@ from pdf2docx import Converter
 from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfReader, PdfWriter
+from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 # PyMuPDF's rebased backend (>=1.24) can return span colors as signed integers,
 # but pdf2docx's rgb_component() assumes unsigned 0-16777215 and crashes on
@@ -32,6 +35,73 @@ _pdf2docx_textspan.rgb_component = _safe_rgb_component
 PDF_EXTENSIONS = {".pdf"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 OFFICE_EXTENSIONS = {".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp"}
+
+
+def _public_web_url(value: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse((value or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise OperationError("Enter a valid public http or https URL")
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror as exc:
+        raise OperationError("The website address could not be resolved") from exc
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if not ip.is_global:
+            raise OperationError("Private, local, and reserved network addresses are not allowed")
+    return parsed.geturl()
+
+
+def html_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
+    url = _public_web_url(str(options.get("url") or ""))
+    width = min(max(int(options.get("screen_width") or 1440), 320), 2560)
+    page_size = str(options.get("page_size") or "A4")
+    if page_size not in {"A4", "Letter", "Legal"}:
+        page_size = "A4"
+    landscape = str(options.get("orientation") or "portrait") == "landscape"
+    long_page = _truthy(options.get("one_long_page"))
+    with sync_playwright() as playwright:
+        browser = None
+        launch_errors = []
+        for launch_options in ({"headless": True}, {"headless": True, "channel": "chrome"}, {"headless": True, "channel": "msedge"}):
+            try:
+                browser = playwright.chromium.launch(**launch_options)
+                break
+            except PlaywrightError as exc:
+                launch_errors.append(str(exc))
+        if browser is None:
+            raise OperationError("No Chromium browser is available. Run: playwright install chromium")
+        page = browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
+
+        def guard(route):
+            try:
+                _public_web_url(route.request.url)
+                route.continue_()
+            except OperationError:
+                route.abort()
+
+        page.route("**/*", guard)
+        response = page.goto(url, wait_until="networkidle", timeout=45000)
+        if not response or not response.ok:
+            browser.close()
+            raise OperationError("The webpage could not be loaded")
+        page.emulate_media(media="screen")
+        pdf_options = {
+            "path": str(output),
+            "print_background": _truthy(options.get("print_background", True)),
+            "landscape": landscape,
+            "margin": {"top": "10mm", "right": "10mm", "bottom": "10mm", "left": "10mm"},
+        }
+        if long_page:
+            height = min(max(page.evaluate("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"), 1), 20000)
+            pdf_options.update({"width": f"{width}px", "height": f"{height}px", "margin": {"top": "0", "right": "0", "bottom": "0", "left": "0"}})
+        else:
+            pdf_options["format"] = page_size
+        page.pdf(**pdf_options)
+        browser.close()
+    return output
 
 
 class OperationError(RuntimeError):
@@ -461,23 +531,68 @@ def images_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
     return output
 
 
+def iter_pdf_images(document: "fitz.Document"):
+    """Yield every embedded image in a PDF as (id, page, index, ext, width, height, data).
+
+    ``id`` (``"<page>-<index>"``, 1-based) is stable across calls for the same
+    document so the extract-images preview and the actual extraction job agree
+    on which image is which.
+    """
+    for page_index in range(len(document)):
+        page = document[page_index]
+        for image_index, image_info in enumerate(page.get_images(full=True), start=1):
+            xref = image_info[0]
+            image = document.extract_image(xref)
+            yield {
+                "id": f"{page_index + 1}-{image_index}",
+                "page": page_index + 1,
+                "index": image_index,
+                "ext": image.get("ext", "png"),
+                "width": image.get("width", 0),
+                "height": image.get("height", 0),
+                "data": image["image"],
+            }
+
+
+def build_image_thumbnail(data: bytes, max_size: int = 240) -> str | None:
+    """Render an embedded image's bytes as a small base64 PNG data URL for previews."""
+    try:
+        pixmap = fitz.Pixmap(data)
+        if pixmap.colorspace is None or pixmap.colorspace.n > 3:
+            pixmap = fitz.Pixmap(fitz.csRGB, pixmap)
+        scale = min(1.0, max_size / max(pixmap.width, pixmap.height, 1))
+        if scale < 1.0:
+            new_width = max(1, round(pixmap.width * scale))
+            new_height = max(1, round(pixmap.height * scale))
+            # PyMuPDF's 3-arg Pixmap(src, w, h) scaled-copy path is broken in some
+            # installed versions (unconditionally unpacks args as if 4 were given),
+            # so always pass the source's own irect as an explicit clip.
+            pixmap = fitz.Pixmap(pixmap, float(new_width), float(new_height), pixmap.irect)
+        thumbnail_bytes = pixmap.tobytes("png")
+    except Exception:
+        return None
+    return "data:image/png;base64," + base64.b64encode(thumbnail_bytes).decode("ascii")
+
+
 def extract_images(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
     document = fitz.open(source)
+    selected = options.get("selected_images")
+    selected_ids = set(selected) if isinstance(selected, list) else None
+    if selected_ids is not None and not selected_ids:
+        document.close()
+        raise OperationError("Select at least one image to extract")
     extracted = 0
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for page_index in range(len(document)):
-            page = document[page_index]
-            for image_index, image_info in enumerate(page.get_images(full=True), start=1):
-                xref = image_info[0]
-                image = document.extract_image(xref)
-                ext = image.get("ext", "png")
-                image_name = f"{source.stem}_page_{page_index + 1}_image_{image_index}.{ext}"
-                image_path = output.parent / image_name
-                image_path.write_bytes(image["image"])
-                archive.write(image_path, image_name)
-                image_path.unlink(missing_ok=True)
-                extracted += 1
+        for entry in iter_pdf_images(document):
+            if selected_ids is not None and entry["id"] not in selected_ids:
+                continue
+            image_name = f"{source.stem}_page_{entry['page']}_image_{entry['index']}.{entry['ext']}"
+            image_path = output.parent / image_name
+            image_path.write_bytes(entry["data"])
+            archive.write(image_path, image_name)
+            image_path.unlink(missing_ok=True)
+            extracted += 1
     document.close()
     if extracted == 0:
         raise OperationError("No embedded images found")
@@ -854,5 +969,6 @@ OPERATIONS = {
     "word_to_pdf": ("converted.pdf", word_to_pdf),
     "excel_to_pdf": ("converted.pdf", excel_to_pdf),
     "powerpoint_to_pdf": ("converted.pdf", powerpoint_to_pdf),
+    "html_to_pdf": ("webpage.pdf", html_to_pdf),
     "ocr": ("searchable.pdf", ocr_pdf),
 }
