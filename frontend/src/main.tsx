@@ -2,6 +2,7 @@ import React, { ChangeEvent, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
+  Bold,
   Combine,
   Crop,
   Download,
@@ -15,6 +16,7 @@ import {
   FileUp,
   Grid3X3,
   Image,
+  Italic,
   LockOpen,
   Plus,
   RotateCw,
@@ -23,12 +25,14 @@ import {
   SplitSquareHorizontal,
   Stamp,
   Trash2,
+  Underline,
   UploadCloud,
 } from "lucide-react";
 import "./styles.css";
 import nfiuLogo from "./assets/nfiu-logo.jpg";
 import { AnnotationDocument, PdfEditor } from "./PdfEditor";
 import { FileThumbnails, PageThumbnails, SingleFilePreview } from "./PdfThumbnails";
+import { CropSelection, PdfCropper } from "./PdfCropper";
 
 type Operation = {
   id: string;
@@ -60,8 +64,8 @@ declare global {
 const optionVisibility: Record<string, string[]> = {
   split: ["every"],
   delete_pages: ["pages"],
-  reorder_pages: ["pages"],
-  crop: ["margin"],
+  reorder_pages: ["pages", "keep_remaining"],
+  crop: [],
   compress: ["quality"],
   protect: ["password"],
   unlock: ["password"],
@@ -70,9 +74,25 @@ const optionVisibility: Record<string, string[]> = {
   pdf_to_images: ["dpi"],
   pdf_to_powerpoint: ["dpi"],
   ocr: ["language"],
+  page_numbers: [
+    "page_number_mode",
+    "page_number_position",
+    "page_number_margin",
+    "page_number_start",
+    "page_number_format",
+    "page_number_style",
+  ],
 };
 
+const pageNumberPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
+
 const pageLevelTools = new Set(["split", "delete_pages", "reorder_pages"]);
+
+const compressionLevels = [
+  { value: "high", label: "Smallest file", description: "Lower quality, high compression" },
+  { value: "balanced", label: "Recommended", description: "Good quality, good compression" },
+  { value: "light", label: "Best quality", description: "Higher quality, less compression" },
+];
 
 const toolIcons: Record<string, React.ElementType> = {
   merge: Combine,
@@ -141,16 +161,30 @@ function App() {
   const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [annotations, setAnnotations] = useState<AnnotationDocument>({ version: 1, pages: [] });
+  const [crop, setCrop] = useState<CropSelection>({ x: 0, y: 0, width: 0, height: 0, page: 1, scope: "all" });
   const [options, setOptions] = useState({
     password: "",
     degrees: "90",
-    quality: "ebook",
+    quality: "balanced",
     text: "CONFIDENTIAL",
     every: "1",
     pages: "",
+    keep_remaining: "false",
     margin: "18",
     dpi: "200",
     language: "eng",
+    page_number_mode: "single",
+    page_number_position: "bottom-center",
+    page_number_margin: "recommended",
+    page_number_start: "1",
+    page_number_format: "number_total",
+    page_number_custom: "Page {n} of {p}",
+    page_number_font: "helvetica",
+    page_number_size: "10",
+    page_number_bold: "false",
+    page_number_italic: "false",
+    page_number_underline: "false",
+    page_number_color: "#1a1f2b",
   });
 
   const selected = useMemo(
@@ -159,7 +193,7 @@ function App() {
   );
 
   const visibleOptions = optionVisibility[selectedId] ?? [];
-  const needsWorkspace = visibleOptions.length > 0 || selected.multiple || selectedId === "edit";
+  const needsWorkspace = visibleOptions.length > 0 || selected.multiple || selectedId === "edit" || selectedId === "crop";
   const visibleTools = useMemo(() => {
     if (activeCategory === "All") return operations;
     const group = groups.find((candidate) => candidate.name === activeCategory);
@@ -212,6 +246,10 @@ function App() {
       setStatus("Waiting for file");
       return;
     }
+    if (selectedId === "crop" && (crop.width <= 0 || crop.height <= 0)) {
+      setError("Draw a crop selection first");
+      return;
+    }
     setIsProcessing(true);
     setError("");
     setDownload(null);
@@ -219,7 +257,7 @@ function App() {
 
     const formData = new FormData();
     formData.set("operation", selectedId);
-    formData.set("options", JSON.stringify(selectedId === "edit" ? { ...options, annotations } : options));
+    formData.set("options", JSON.stringify(selectedId === "edit" ? { ...options, annotations } : selectedId === "crop" ? { ...options, crop } : options));
     fileList.forEach((file) => formData.append("files", file));
 
     const response = await fetch("/jobs/", {
@@ -398,7 +436,9 @@ function App() {
           ) : (
             <div className="workspace">
               <div className="workspace-main">
-                {selected.multiple ? (
+                {selectedId === "crop" ? (
+                  <PdfCropper file={files[0]} value={crop} onChange={setCrop} />
+                ) : selected.multiple ? (
                   <FileThumbnails files={files} />
                 ) : pageLevelTools.has(selectedId) ? (
                   <PageThumbnails file={files[0]} />
@@ -429,14 +469,29 @@ function App() {
                     </Field>
                   )}
                   {visibleOptions.includes("quality") && (
-                    <Field label="Compression">
-                      <select value={options.quality} onChange={(event) => updateOption("quality", event.target.value)}>
-                        <option value="ebook">Balanced</option>
-                        <option value="screen">Smallest</option>
-                        <option value="printer">Print quality</option>
-                        <option value="prepress">Prepress</option>
-                      </select>
-                    </Field>
+                    <div className="field">
+                      <span>Compression level</span>
+                      <div className="compression-options">
+                        {compressionLevels.map((level) => (
+                          <label
+                            key={level.value}
+                            className={options.quality === level.value ? "compression-option selected" : "compression-option"}
+                          >
+                            <input
+                              type="radio"
+                              name="quality"
+                              checked={options.quality === level.value}
+                              onChange={() => updateOption("quality", level.value)}
+                            />
+                            <span className="compression-option-text">
+                              <strong>{level.label}</strong>
+                              <small>{level.description}</small>
+                            </span>
+                            <span className="compression-option-check" />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
                   )}
                   {visibleOptions.includes("text") && (
                     <Field label="Watermark text">
@@ -449,14 +504,22 @@ function App() {
                     </Field>
                   )}
                   {visibleOptions.includes("pages") && (
-                    <Field label="Pages">
+                    <Field label={selectedId === "reorder_pages" ? "New page order" : "Pages"}>
                       <input placeholder="1,3,5-8" value={options.pages} onChange={(event) => updateOption("pages", event.target.value)} />
                     </Field>
                   )}
-                  {visibleOptions.includes("margin") && (
-                    <Field label="Crop margin points">
-                      <input type="number" min={0} value={options.margin} onChange={(event) => updateOption("margin", event.target.value)} />
-                    </Field>
+                  {visibleOptions.includes("keep_remaining") && (
+                    <label className="field field-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={options.keep_remaining === "true"}
+                        onChange={(event) => updateOption("keep_remaining", event.target.checked ? "true" : "false")}
+                      />
+                      <span>
+                        Keep the rest of the pages
+                        <small>Pages not listed above are appended after, in their original order</small>
+                      </span>
+                    </label>
                   )}
                   {visibleOptions.includes("dpi") && (
                     <Field label="Image DPI">
@@ -467,6 +530,150 @@ function App() {
                     <Field label="OCR language">
                       <input value={options.language} onChange={(event) => updateOption("language", event.target.value)} />
                     </Field>
+                  )}
+                  {visibleOptions.includes("page_number_mode") && (
+                    <div className="field">
+                      <span>Page mode</span>
+                      <div className="radio-row">
+                        <label>
+                          <input
+                            type="radio"
+                            checked={options.page_number_mode === "single"}
+                            onChange={() => updateOption("page_number_mode", "single")}
+                          />
+                          Single page
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            checked={options.page_number_mode === "facing"}
+                            onChange={() => updateOption("page_number_mode", "facing")}
+                          />
+                          Facing pages
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                  {visibleOptions.includes("page_number_position") && (
+                    <div className="field">
+                      <span>Position</span>
+                      <div className="position-picker">
+                        <div className="position-row">
+                          {pageNumberPositions.slice(0, 3).map((pos) => (
+                            <button
+                              key={pos}
+                              type="button"
+                              aria-label={pos.replace("-", " ")}
+                              className={options.page_number_position === pos ? "position-dot selected" : "position-dot"}
+                              onClick={() => updateOption("page_number_position", pos)}
+                            />
+                          ))}
+                        </div>
+                        <div className="position-page" />
+                        <div className="position-row">
+                          {pageNumberPositions.slice(3, 6).map((pos) => (
+                            <button
+                              key={pos}
+                              type="button"
+                              aria-label={pos.replace("-", " ")}
+                              className={options.page_number_position === pos ? "position-dot selected" : "position-dot"}
+                              onClick={() => updateOption("page_number_position", pos)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {visibleOptions.includes("page_number_margin") && (
+                    <Field label="Margin">
+                      <select value={options.page_number_margin} onChange={(event) => updateOption("page_number_margin", event.target.value)}>
+                        <option value="small">Small</option>
+                        <option value="recommended">Recommended</option>
+                        <option value="big">Big</option>
+                      </select>
+                    </Field>
+                  )}
+                  {visibleOptions.includes("page_number_start") && (
+                    <Field label="Start numbering at">
+                      <input
+                        type="number"
+                        min={1}
+                        value={options.page_number_start}
+                        onChange={(event) => updateOption("page_number_start", event.target.value)}
+                      />
+                    </Field>
+                  )}
+                  {visibleOptions.includes("page_number_format") && (
+                    <Field label="Text">
+                      <select value={options.page_number_format} onChange={(event) => updateOption("page_number_format", event.target.value)}>
+                        <option value="number">Just the number (1, 2, 3&hellip;)</option>
+                        <option value="page_n">Page 1</option>
+                        <option value="page_of">Page 1 of 12</option>
+                        <option value="number_total">Number / total (1 / 12)</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </Field>
+                  )}
+                  {visibleOptions.includes("page_number_format") && options.page_number_format === "custom" && (
+                    <Field label="Custom text (use {n} and {p})">
+                      <input value={options.page_number_custom} onChange={(event) => updateOption("page_number_custom", event.target.value)} />
+                    </Field>
+                  )}
+                  {visibleOptions.includes("page_number_style") && (
+                    <div className="field">
+                      <span>Text format</span>
+                      <div className="text-style-row">
+                        <select
+                          className="text-style-font"
+                          value={options.page_number_font}
+                          onChange={(event) => updateOption("page_number_font", event.target.value)}
+                        >
+                          <option value="helvetica">Helvetica</option>
+                          <option value="times">Times</option>
+                          <option value="courier">Courier</option>
+                        </select>
+                        <input
+                          type="number"
+                          min={4}
+                          max={72}
+                          className="text-style-size"
+                          value={options.page_number_size}
+                          onChange={(event) => updateOption("page_number_size", event.target.value)}
+                        />
+                      </div>
+                      <div className="text-style-row">
+                        <button
+                          type="button"
+                          className={options.page_number_bold === "true" ? "text-style-toggle active" : "text-style-toggle"}
+                          aria-label="Bold"
+                          onClick={() => updateOption("page_number_bold", options.page_number_bold === "true" ? "false" : "true")}
+                        >
+                          <Bold size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className={options.page_number_italic === "true" ? "text-style-toggle active" : "text-style-toggle"}
+                          aria-label="Italic"
+                          onClick={() => updateOption("page_number_italic", options.page_number_italic === "true" ? "false" : "true")}
+                        >
+                          <Italic size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className={options.page_number_underline === "true" ? "text-style-toggle active" : "text-style-toggle"}
+                          aria-label="Underline"
+                          onClick={() => updateOption("page_number_underline", options.page_number_underline === "true" ? "false" : "true")}
+                        >
+                          <Underline size={16} />
+                        </button>
+                        <input
+                          type="color"
+                          className="text-style-color"
+                          value={options.page_number_color}
+                          onChange={(event) => updateOption("page_number_color", event.target.value)}
+                        />
+                      </div>
+                    </div>
                   )}
                 </div>
 

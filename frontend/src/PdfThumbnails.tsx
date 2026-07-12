@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { FileText } from "lucide-react";
@@ -8,6 +8,9 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 const PDF_TYPE = "application/pdf";
 
 async function renderFirstPage(file: File): Promise<string | null> {
+  if (file.type.startsWith("image/")) {
+    return URL.createObjectURL(file);
+  }
   if (file.type !== PDF_TYPE) return null;
   try {
     const data = await file.arrayBuffer();
@@ -34,6 +37,7 @@ async function renderPage(pdf: pdfjs.PDFDocumentProxy, pageNumber: number): Prom
 /** One thumbnail per uploaded file (first page each). For multi-file tools like Merge. */
 export function FileThumbnails({ files }: { files: File[] }) {
   const [thumbs, setThumbs] = useState<Record<string, string | null>>({});
+  const objectUrls = useRef<string[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -41,7 +45,9 @@ export function FileThumbnails({ files }: { files: File[] }) {
       const key = `${file.name}-${file.size}`;
       if (key in thumbs) return;
       renderFirstPage(file).then((url) => {
-        if (active) setThumbs((current) => ({ ...current, [key]: url }));
+        if (!active) return;
+        if (url && file.type.startsWith("image/")) objectUrls.current.push(url);
+        setThumbs((current) => ({ ...current, [key]: url }));
       });
     });
     return () => {
@@ -49,6 +55,12 @@ export function FileThumbnails({ files }: { files: File[] }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files]);
+
+  useEffect(() => {
+    return () => {
+      objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
 
   return (
     <div className="thumb-grid">
@@ -125,12 +137,16 @@ export function SingleFilePreview({ file }: { file: File }) {
 
   useEffect(() => {
     let active = true;
+    let createdUrl: string | null = null;
     setUrl(null);
     renderFirstPage(file).then((result) => {
-      if (active) setUrl(result);
+      if (!active) return;
+      if (result && file.type.startsWith("image/")) createdUrl = result;
+      setUrl(result);
     });
     return () => {
       active = false;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
   }, [file]);
 

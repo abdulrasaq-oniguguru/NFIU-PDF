@@ -305,6 +305,222 @@ button {
   padding: 0 12px;
 }
 
+.radio-row {
+  display: flex;
+  gap: 18px;
+}
+
+.radio-row label {
+  align-items: center;
+  color: var(--ink);
+  display: flex;
+  font-size: 13.5px;
+  gap: 6px;
+}
+
+.text-style-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.text-style-row + .text-style-row {
+  margin-top: 8px;
+}
+
+.text-style-row .text-style-font {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex: 1;
+  min-height: 38px;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+.workspace-sidebar .text-style-toggle {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  flex: 0 0 auto;
+  height: 38px;
+  min-height: 0;
+  width: 38px;
+}
+
+.workspace-sidebar .text-style-toggle.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+.text-style-row .text-style-size {
+  flex: 0 0 60px;
+  min-height: 38px;
+  padding: 0 8px;
+  width: 60px;
+}
+
+.text-style-row .text-style-color {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  height: 38px;
+  min-height: 0;
+  padding: 2px;
+  width: 38px;
+}
+
+.position-picker {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+}
+
+.position-row {
+  display: flex;
+  justify-content: space-between;
+}
+
+.position-page {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-height: 48px;
+}
+
+.workspace-sidebar .position-dot {
+  background: #fff;
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  cursor: pointer;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  width: 16px;
+}
+
+.workspace-sidebar .position-dot:hover {
+  border-color: var(--brand);
+}
+
+.workspace-sidebar .position-dot.selected {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+
+.compression-options {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.compression-option {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  transition: background 0.15s ease;
+}
+
+.compression-option:last-child {
+  border-bottom: none;
+}
+
+.compression-option:hover {
+  background: var(--soft);
+}
+
+.compression-option input {
+  display: none;
+}
+
+.compression-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.compression-option-text strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.compression-option-text small {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.compression-option-check {
+  border: 2px solid var(--line);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 20px;
+  margin-left: auto;
+  position: relative;
+  width: 20px;
+}
+
+.compression-option.selected {
+  background: var(--soft);
+}
+
+.compression-option.selected .compression-option-check {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.compression-option.selected .compression-option-check::after {
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  content: "";
+  height: 9px;
+  left: 6px;
+  position: absolute;
+  top: 2px;
+  transform: rotate(45deg);
+  width: 5px;
+}
+
+.field-checkbox {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.field-checkbox input[type="checkbox"] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.field-checkbox span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field-checkbox small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .job-actions {
   align-items: center;
   display: flex;
@@ -803,6 +1019,23 @@ button {
   max-width: 340px;
 }
 
+.cropper { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr) 250px; width: 100%; }
+.crop-stage { align-items: center; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.crop-page { box-shadow: 0 4px 18px rgba(16,24,40,.18); max-width: 100%; position: relative; touch-action: none; }
+.crop-page.drawing { cursor: crosshair; }
+.crop-page canvas { display: block; height: 100%; max-width: 100%; width: 100%; }
+.crop-shade { background: rgba(17,24,39,.58); inset: 0; pointer-events: none; position: absolute; }
+.crop-selection { border: 2px solid #1683d8; box-shadow: 0 0 0 9999px rgba(17,24,39,0); cursor: move; position: absolute; }
+.crop-selection::before { background: rgba(255,255,255,.06); content: ""; inset: 0; position: absolute; }
+.crop-selection { backdrop-filter: brightness(1.75); }
+.crop-handle { background: #1683d8; border: 2px solid #fff; border-radius: 50%; height: 14px; position: absolute; width: 14px; }
+.crop-handle.nw { cursor: nwse-resize; left: -8px; top: -8px; }.crop-handle.n { cursor: ns-resize; left: calc(50% - 7px); top: -8px; }.crop-handle.ne { cursor: nesw-resize; right: -8px; top: -8px; }.crop-handle.e { cursor: ew-resize; right: -8px; top: calc(50% - 7px); }.crop-handle.se { bottom: -8px; cursor: nwse-resize; right: -8px; }.crop-handle.s { bottom: -8px; cursor: ns-resize; left: calc(50% - 7px); }.crop-handle.sw { bottom: -8px; cursor: nesw-resize; left: -8px; }.crop-handle.w { cursor: ew-resize; left: -8px; top: calc(50% - 7px); }
+.crop-controls { align-items: flex-start; display: flex; flex-direction: column; gap: 14px; }
+.crop-tip { background: #e5f4ff; border-radius: 8px; color: #164b70; font-size: 14px; line-height: 1.45; padding: 14px; }
+.crop-controls .crop-reset { background: transparent; color: var(--brand); min-height: auto; padding: 0; text-decoration: underline; width: auto; }
+.crop-controls label { align-items: center; display: flex; gap: 8px; }
+.crop-pagination { align-items: center; display: flex; gap: 12px; }.crop-pagination button { min-height: 34px; width: auto; }
+
 .thumb-frame-large {
   aspect-ratio: 3 / 4;
 }
@@ -963,6 +1196,7 @@ button {
   .workspace-sidebar {
     position: static;
   }
+  .cropper { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {

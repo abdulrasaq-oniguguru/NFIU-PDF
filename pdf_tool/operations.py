@@ -96,9 +96,13 @@ def delete_pages(files: list[Path], output: Path, options: dict) -> Path:
 def reorder_pages(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
     reader = PdfReader(str(source))
-    order = parse_page_spec(options.get("pages") or "", len(reader.pages))
+    page_count = len(reader.pages)
+    order = parse_page_spec(options.get("pages") or "", page_count)
     if not order:
         raise OperationError("Enter the new page order")
+    if str(options.get("keep_remaining") or "").lower() in ("1", "true", "yes", "on"):
+        moved = set(order)
+        order = order + [page for page in range(1, page_count + 1) if page not in moved]
     writer = PdfWriter()
     for page_number in order:
         writer.add_page(reader.pages[page_number - 1])
@@ -122,38 +126,70 @@ def rotate_pdf(files: list[Path], output: Path, options: dict) -> Path:
 
 def crop_pdf(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
-    margin = max(float(options.get("margin") or 0), 0)
     reader = PdfReader(str(source))
     writer = PdfWriter()
-    for page in reader.pages:
-        page.cropbox.lower_left = (float(page.cropbox.left) + margin, float(page.cropbox.bottom) + margin)
-        page.cropbox.upper_right = (float(page.cropbox.right) - margin, float(page.cropbox.top) - margin)
+    crop = options.get("crop") or {}
+    use_selection = all(key in crop for key in ("x", "y", "width", "height"))
+    margin = max(float(options.get("margin") or 0), 0)
+    for index, page in enumerate(reader.pages, start=1):
+        applies = crop.get("scope", "all") == "all" or index == int(crop.get("page") or 1)
+        if use_selection and applies:
+            left, bottom, right, top = map(float, (page.cropbox.left, page.cropbox.bottom, page.cropbox.right, page.cropbox.top))
+            page_width, page_height = right - left, top - bottom
+            x = min(max(float(crop["x"]), 0), 1)
+            y = min(max(float(crop["y"]), 0), 1)
+            width = min(max(float(crop["width"]), 0.001), 1 - x)
+            height = min(max(float(crop["height"]), 0.001), 1 - y)
+            page.cropbox.lower_left = (left + x * page_width, top - (y + height) * page_height)
+            page.cropbox.upper_right = (left + (x + width) * page_width, top - y * page_height)
+        elif not use_selection and margin:
+            page.cropbox.lower_left = (float(page.cropbox.left) + margin, float(page.cropbox.bottom) + margin)
+            page.cropbox.upper_right = (float(page.cropbox.right) - margin, float(page.cropbox.top) - margin)
         writer.add_page(page)
     with output.open("wb") as handle:
         writer.write(handle)
     return output
 
 
+# Named Ghostscript presets (/ebook, /printer, ...) only downsample images that
+# already exceed their built-in default resolution, so a document with images
+# at or below that resolution just gets re-encoded with no size benefit (and
+# sometimes a net increase from added font/structure overhead). Forcing an
+# explicit resolution per tier makes each tier actually downsample.
+COMPRESSION_PROFILES = {
+    "high": {"preset": "screen", "dpi": 96},
+    "balanced": {"preset": "ebook", "dpi": 150},
+    "light": {"preset": "printer", "dpi": 300},
+}
+
+
 def compress_pdf(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
     ghostscript = resolve_binary("gs", "gswin64c", "gswin32c")
-    quality = options.get("quality") or "ebook"
-    if quality not in {"screen", "ebook", "printer", "prepress", "default"}:
-        quality = "ebook"
+    quality = options.get("quality") or "balanced"
+    profile = COMPRESSION_PROFILES.get(quality, COMPRESSION_PROFILES["balanced"])
     subprocess.run(
         [
             ghostscript,
             "-sDEVICE=pdfwrite",
             "-dCompatibilityLevel=1.4",
-            f"-dPDFSETTINGS=/{quality}",
+            f"-dPDFSETTINGS=/{profile['preset']}",
             "-dNOPAUSE",
             "-dQUIET",
             "-dBATCH",
+            "-dDownsampleColorImages=true",
+            f"-dColorImageResolution={profile['dpi']}",
+            "-dDownsampleGrayImages=true",
+            f"-dGrayImageResolution={profile['dpi']}",
+            "-dDownsampleMonoImages=true",
+            f"-dMonoImageResolution={profile['dpi']}",
             f"-sOutputFile={output}",
             str(source),
         ],
         check=True,
     )
+    if output.stat().st_size >= source.stat().st_size:
+        shutil.copyfile(source, output)
     return output
 
 
@@ -306,20 +342,104 @@ def _char_quads(direction, span: dict, chars: list[dict]) -> list[fitz.Quad]:
     return quads
 
 
+PAGE_NUMBER_POSITIONS = {
+    "top-left": ("top", fitz.TEXT_ALIGN_LEFT, "left"),
+    "top-center": ("top", fitz.TEXT_ALIGN_CENTER, "center"),
+    "top-right": ("top", fitz.TEXT_ALIGN_RIGHT, "right"),
+    "bottom-left": ("bottom", fitz.TEXT_ALIGN_LEFT, "left"),
+    "bottom-center": ("bottom", fitz.TEXT_ALIGN_CENTER, "center"),
+    "bottom-right": ("bottom", fitz.TEXT_ALIGN_RIGHT, "right"),
+}
+
+PAGE_NUMBER_MARGINS = {"small": 10, "recommended": 20, "big": 36}
+
+PAGE_NUMBER_FONTS = {
+    ("helvetica", False, False): "helv",
+    ("helvetica", True, False): "hebo",
+    ("helvetica", False, True): "heit",
+    ("helvetica", True, True): "hebi",
+    ("times", False, False): "tiro",
+    ("times", True, False): "tibo",
+    ("times", False, True): "tiit",
+    ("times", True, True): "tibi",
+    ("courier", False, False): "cour",
+    ("courier", True, False): "cobo",
+    ("courier", False, True): "coit",
+    ("courier", True, True): "cobi",
+}
+
+
+def _truthy(value) -> bool:
+    return str(value or "false").lower() in ("1", "true", "yes", "on")
+
+
+def _hex_to_rgb(value: str) -> tuple:
+    value = (value or "#1a1f2b").lstrip("#")
+    if len(value) != 6:
+        value = "1a1f2b"
+    return tuple(int(value[i : i + 2], 16) / 255 for i in (0, 2, 4))
+
+
 def page_numbers_pdf(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
     document = fitz.open(source)
-    total = len(document)
-    for index, page in enumerate(document, start=1):
+    start = max(int(options.get("page_number_start") or 1), 1)
+    last_number = start + len(document) - 1
+    template = options.get("page_number_format") or "number_total"
+    custom_text = options.get("page_number_custom") or "Page {n} of {p}"
+    vertical, align, horizontal = PAGE_NUMBER_POSITIONS.get(
+        options.get("page_number_position") or "bottom-center", PAGE_NUMBER_POSITIONS["bottom-center"]
+    )
+    facing = (options.get("page_number_mode") or "single") == "facing"
+    margin = PAGE_NUMBER_MARGINS.get(options.get("page_number_margin") or "recommended", 20)
+    box_height = 24
+
+    bold = _truthy(options.get("page_number_bold"))
+    italic = _truthy(options.get("page_number_italic"))
+    underline = _truthy(options.get("page_number_underline"))
+    fontname = PAGE_NUMBER_FONTS.get((options.get("page_number_font") or "helvetica", bold, italic), "helv")
+    fontsize = max(float(options.get("page_number_size") or 10), 4)
+    color = _hex_to_rgb(options.get("page_number_color"))
+
+    for index, page in enumerate(document):
+        number = start + index
+        if template == "page_n":
+            text = f"Page {number}"
+        elif template == "page_of":
+            text = f"Page {number} of {last_number}"
+        elif template == "custom":
+            text = custom_text.replace("{n}", str(number)).replace("{p}", str(last_number))
+        elif template == "number":
+            text = str(number)
+        else:
+            text = f"{number} / {last_number}"
+
+        page_align = align
+        # On facing pages, mirror left/right placement on even pages so the
+        # number always sits on the outer edge, like a printed book spread.
+        if facing and index % 2 == 1 and horizontal in ("left", "right"):
+            page_align = fitz.TEXT_ALIGN_RIGHT if horizontal == "left" else fitz.TEXT_ALIGN_LEFT
+
         rect = page.rect
-        page.insert_textbox(
-            fitz.Rect(0, rect.height - 34, rect.width, rect.height - 12),
-            f"{index} / {total}",
-            fontsize=10,
-            fontname="helv",
-            color=(0.1, 0.12, 0.16),
-            align=fitz.TEXT_ALIGN_CENTER,
-        )
+        y0 = margin if vertical == "top" else rect.height - margin - box_height
+        box = fitz.Rect(12, y0, rect.width - 12, y0 + box_height)
+        page.insert_textbox(box, text, fontsize=fontsize, fontname=fontname, color=color, align=page_align)
+
+        if underline:
+            text_width = fitz.get_text_length(text, fontname=fontname, fontsize=fontsize)
+            if page_align == fitz.TEXT_ALIGN_LEFT:
+                x0 = box.x0 + 2
+            elif page_align == fitz.TEXT_ALIGN_RIGHT:
+                x0 = box.x1 - 2 - text_width
+            else:
+                x0 = box.x0 + (box.width - text_width) / 2
+            underline_y = y0 + box_height - 6
+            page.draw_line(
+                fitz.Point(x0, underline_y),
+                fitz.Point(x0 + text_width, underline_y),
+                color=color,
+                width=max(fontsize * 0.06, 0.6),
+            )
     document.save(output)
     document.close()
     return output

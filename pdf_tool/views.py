@@ -142,7 +142,10 @@ def read_options(post_data) -> dict:
         options = {}
     allowed = {
         "password", "degrees", "quality", "text", "every", "dpi", "language", "pages", "margin",
-        "annotations", "signer_name", "signer_email",
+        "annotations", "signer_name", "signer_email", "crop", "keep_remaining",
+        "page_number_position", "page_number_start", "page_number_format", "page_number_custom",
+        "page_number_margin", "page_number_mode", "page_number_font", "page_number_size",
+        "page_number_bold", "page_number_italic", "page_number_underline", "page_number_color",
     }
     return {key: value for key, value in options.items() if key in allowed}
 
