@@ -6,6 +6,7 @@ from django.conf import settings
 from django.http import FileResponse, Http404, JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
@@ -67,8 +68,14 @@ OPERATION_GROUPS = [
 OPERATIONS = [operation for group in OPERATION_GROUPS for operation in group["operations"]]
 
 
+@never_cache
 @ensure_csrf_cookie
 def home(request):
+    asset_dir = Path(settings.BASE_DIR) / "static" / "pdf_tool" / "react"
+    asset_version = max(
+        (path.stat().st_mtime_ns for path in (asset_dir / "app.js", asset_dir / "main.css") if path.exists()),
+        default=0,
+    )
     return render(
         request,
         "pdf_tool/home.html",
@@ -77,6 +84,7 @@ def home(request):
             "operations": OPERATIONS,
             "operation_groups_json": json.dumps(OPERATION_GROUPS),
             "operations_json": json.dumps(OPERATIONS),
+            "asset_version": asset_version,
         },
     )
 
@@ -178,6 +186,10 @@ def read_options(post_data) -> dict:
         "page_number_position", "page_number_start", "page_number_format", "page_number_custom",
         "page_number_margin", "page_number_mode", "page_number_font", "page_number_size",
         "page_number_bold", "page_number_italic", "page_number_underline", "page_number_color",
+        "watermark_font", "watermark_size", "watermark_bold", "watermark_italic",
+        "watermark_underline", "watermark_color", "watermark_position", "watermark_mosaic",
+        "watermark_transparency", "watermark_rotation", "watermark_from_page",
+        "watermark_to_page", "watermark_layer",
         "url", "screen_width", "page_size", "orientation", "one_long_page", "print_background",
     }
     return {key: value for key, value in options.items() if key in allowed}

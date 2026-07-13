@@ -3,6 +3,7 @@ import hashlib
 import math
 import os
 import ipaddress
+import re
 import socket
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from pdf2docx import Converter
 from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, NumberObject, TextStringObject
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 # PyMuPDF's rebased backend (>=1.24) can return span colors as signed integers,
@@ -292,26 +294,111 @@ def unlock_pdf(files: list[Path], output: Path, options: dict) -> Path:
     return output
 
 
+WATERMARK_POSITIONS = {
+    "top-left": (0.2, 0.18),
+    "top-center": (0.5, 0.18),
+    "top-right": (0.8, 0.18),
+    "middle-left": (0.2, 0.5),
+    "center": (0.5, 0.5),
+    "middle-right": (0.8, 0.5),
+    "bottom-left": (0.2, 0.82),
+    "bottom-center": (0.5, 0.82),
+    "bottom-right": (0.8, 0.82),
+}
+
+
+def _clamp_float(value, default: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return min(max(number, minimum), maximum)
+
+
+def _clamp_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return min(max(number, minimum), maximum)
+
+
+def _watermark_font(options: dict) -> str:
+    bold = _truthy(options.get("watermark_bold"))
+    italic = _truthy(options.get("watermark_italic"))
+    return PAGE_NUMBER_FONTS.get((options.get("watermark_font") or "helvetica", bold, italic), "helv")
+
+
+def _watermark_points(page, options: dict) -> list[fitz.Point]:
+    rect = page.rect
+    if _truthy(options.get("watermark_mosaic")):
+        return [fitz.Point(rect.width * x, rect.height * y) for y in (0.22, 0.5, 0.78) for x in (0.22, 0.5, 0.78)]
+    x_ratio, y_ratio = WATERMARK_POSITIONS.get(options.get("watermark_position") or "center", WATERMARK_POSITIONS["center"])
+    return [fitz.Point(rect.width * x_ratio, rect.height * y_ratio)]
+
+
+def _draw_watermark_text(page, text: str, point: fitz.Point, options: dict) -> None:
+    fontsize = _clamp_float(options.get("watermark_size"), 48, 8, 180)
+    fontname = _watermark_font(options)
+    color = _hex_to_rgb(options.get("watermark_color") or "#727272")
+    opacity = _clamp_float(options.get("watermark_transparency"), 0.18, 0.05, 1)
+    rotation = _clamp_float(options.get("watermark_rotation"), 45, -180, 180)
+    overlay = (options.get("watermark_layer") or "over") != "under"
+
+    text_width = max(fitz.get_text_length(text, fontname=fontname, fontsize=fontsize), fontsize * 2)
+    box_width = min(max(text_width + fontsize * 2, fontsize * 4), page.rect.width * 1.8)
+    box_height = fontsize * 2.2
+    box = fitz.Rect(point.x - box_width / 2, point.y - box_height / 2, point.x + box_width / 2, point.y + box_height / 2)
+    # PyMuPDF's page-coordinate rotation is visually opposite to CSS rotation.
+    morph = (point, fitz.Matrix(1, 1).prerotate(-rotation)) if rotation else None
+    page.insert_textbox(
+        box,
+        text,
+        fontsize=fontsize,
+        fontname=fontname,
+        color=color,
+        align=fitz.TEXT_ALIGN_CENTER,
+        morph=morph,
+        fill_opacity=opacity,
+        overlay=overlay,
+    )
+    if _truthy(options.get("watermark_underline")):
+        angle = math.radians(rotation)
+        direction = fitz.Point(math.cos(angle), math.sin(angle))
+        normal = fitz.Point(-math.sin(angle), math.cos(angle))
+        underline_center = point + normal * (fontsize * 0.58)
+        half_width = text_width / 2
+        page.draw_line(
+            underline_center - direction * half_width,
+            underline_center + direction * half_width,
+            color=color,
+            width=max(fontsize * 0.05, 0.6),
+            stroke_opacity=opacity,
+            overlay=overlay,
+        )
+
+
 def watermark_pdf(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
-    text = options.get("text") or "CONFIDENTIAL"
+    text = str(options.get("text") or "CONFIDENTIAL").strip()
+    if not text:
+        raise OperationError("Enter watermark text")
     document = fitz.open(source)
-    for page in document:
-        rect = page.rect
-        center = fitz.Point(rect.width / 2, rect.height / 2)
-        morph = (center, fitz.Matrix(1, 1).prerotate(45))
-        page.insert_textbox(
-            rect,
-            text,
-            fontsize=max(min(rect.width, rect.height) / 12, 24),
-            fontname="helv",
-            color=(0.45, 0.45, 0.45),
-            align=fitz.TEXT_ALIGN_CENTER,
-            morph=morph,
-            fill_opacity=0.18,
-        )
-    document.save(output)
-    document.close()
+    try:
+        first_page = _clamp_int(options.get("watermark_from_page"), 1, 1, len(document))
+        last_page = _clamp_int(options.get("watermark_to_page"), len(document), first_page, len(document))
+        for page_index in range(first_page - 1, last_page):
+            page = document[page_index]
+            original_streams = set(page.get_contents())
+            for point in _watermark_points(page, options):
+                _draw_watermark_text(page, text, point, options)
+            watermark_streams = [xref for xref in page.get_contents() if xref not in original_streams]
+            if watermark_streams:
+                references = " ".join(f"{xref} 0 R" for xref in watermark_streams)
+                document.xref_set_key(page.xref, "NFIUWatermarkStreams", f"[{references}]")
+        document.save(output)
+    finally:
+        document.close()
     return output
 
 
@@ -322,6 +409,8 @@ def remove_watermark_pdf(files: list[Path], output: Path, options: dict) -> Path
     threshold = max(1, math.ceil(page_count * 0.6))
 
     text_groups: dict[tuple[str, int], list[tuple[int, fitz.Quad]]] = defaultdict(list)
+    text_group_values: dict[tuple[str, int], str] = {}
+    diagonal_text_groups: set[tuple[str, int]] = set()
     for page_index in range(page_count):
         page = document[page_index]
         min_dim = min(page.rect.width, page.rect.height)
@@ -340,6 +429,9 @@ def remove_watermark_pdf(files: list[Path], output: Path, options: dict) -> Path
                     is_large = span.get("size", 0) > 0.05 * min_dim
                     if is_diagonal or is_large:
                         key = (text.lower(), round(angle))
+                        text_group_values.setdefault(key, text)
+                        if is_diagonal:
+                            diagonal_text_groups.add(key)
                         for quad in _char_quads(direction, span, chars):
                             text_groups[key].append((page_index, quad))
 
@@ -356,10 +448,34 @@ def remove_watermark_pdf(files: list[Path], output: Path, options: dict) -> Path
             for rect in page.get_image_rects(xref):
                 image_groups[digest].append((page_index, rect))
 
-    removed = 0
-    for occurrences in text_groups.values():
-        if len({page_index for page_index, _ in occurrences}) >= threshold:
-            for page_index, quad in occurrences:
+    stream_removals: dict[int, set[int]] = defaultdict(set)
+    for page_index, page in enumerate(document):
+        key_type, key_value = document.xref_get_key(page.xref, "NFIUWatermarkStreams")
+        if key_type == "array":
+            stream_removals[page_index].update(int(value) for value in re.findall(r"(\d+)\s+0\s+R", key_value))
+
+    removed = sum(len(xrefs) for xrefs in stream_removals.values())
+    for key, occurrences in text_groups.items():
+        occurrence_pages = {page_index for page_index, _ in occurrences}
+        if key not in diagonal_text_groups and len(occurrence_pages) < threshold:
+            continue
+
+        encoded_text = text_group_values[key].encode("latin-1", errors="ignore").hex().encode("ascii")
+        stream_matches: dict[int, set[int]] = defaultdict(set)
+        if encoded_text:
+            for page_index in occurrence_pages:
+                for xref in document[page_index].get_contents():
+                    stream = document.xref_stream(xref)
+                    if len(stream) <= 16384 and encoded_text in stream.lower():
+                        stream_matches[page_index].add(xref)
+
+        for page_index, quad in occurrences:
+            matches = stream_matches.get(page_index)
+            if matches:
+                before = len(stream_removals[page_index])
+                stream_removals[page_index].update(matches)
+                removed += len(stream_removals[page_index]) - before
+            else:
                 document[page_index].add_redact_annot(quad)
                 removed += 1
     for occurrences in image_groups.values():
@@ -371,6 +487,13 @@ def remove_watermark_pdf(files: list[Path], output: Path, options: dict) -> Path
     if removed == 0:
         document.close()
         raise OperationError("No watermark-like content was detected")
+
+    for page_index, xrefs in stream_removals.items():
+        page = document[page_index]
+        remaining = [xref for xref in page.get_contents() if xref not in xrefs]
+        references = " ".join(f"{xref} 0 R" for xref in remaining)
+        document.xref_set_key(page.xref, "Contents", f"[{references}]")
+        document.xref_set_key(page.xref, "NFIUWatermarkStreams", "null")
 
     for page in document:
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE)
@@ -771,6 +894,7 @@ def flatten_edits(files: list[Path], output: Path, options: dict) -> Path:
     if not isinstance(pages, list):
         raise OperationError("Invalid annotation document")
 
+    signature_fields: list[tuple[int, dict]] = []
     document = fitz.open(source)
     try:
         for page_data in pages:
@@ -782,15 +906,19 @@ def flatten_edits(files: list[Path], output: Path, options: dict) -> Path:
 
             for item in objects:
                 if item.get("type") == "text" and item.get("erase", True):
-                    page.add_redact_annot(normalized_rect(page, item), fill=(1, 1, 1))
+                    page.add_redact_annot(normalized_erase_rect(page, item), fill=(1, 1, 1))
             if any(item.get("type") == "text" and item.get("erase", True) for item in objects):
                 page.apply_redactions()
 
             for item in objects:
+                if item.get("type") == "signature_field":
+                    signature_fields.append((page_index, item))
                 draw_annotation(page, item)
         document.save(output, garbage=4, deflate=True)
     finally:
         document.close()
+    if signature_fields:
+        add_signature_widgets(output, signature_fields)
     return output
 
 
@@ -801,7 +929,21 @@ def draw_annotation(page, item: dict) -> None:
     if kind == "text":
         rect = normalized_rect(page, item)
         fontsize = max(float(item.get("font_size", 16)) * page.rect.width / float(item.get("viewport_width") or page.rect.width), 6)
-        page.insert_textbox(rect, str(item.get("text", "")), fontsize=fontsize, fontname="helv", color=color)
+        rect = fitz.Rect(rect.x0, rect.y0, rect.x1, min(max(rect.y1, rect.y0 + fontsize * 1.4), page.rect.y1))
+        family = str(item.get("font_family") or "helvetica").lower()
+        family_key = "times" if "times" in family else "courier" if "courier" in family else "helvetica"
+        fontname = PAGE_NUMBER_FONTS.get((family_key, _truthy(item.get("bold")), _truthy(item.get("italic"))), "helv")
+        align = {"center": fitz.TEXT_ALIGN_CENTER, "right": fitz.TEXT_ALIGN_RIGHT}.get(item.get("align"), fitz.TEXT_ALIGN_LEFT)
+        text = str(item.get("text", ""))
+        text_width = min(fitz.get_text_length(text, fontname=fontname, fontsize=fontsize), max(page.rect.x1 - rect.x0, 1))
+        x0 = rect.x0 if align == fitz.TEXT_ALIGN_LEFT else rect.x1 - text_width if align == fitz.TEXT_ALIGN_RIGHT else rect.x0 + (rect.width - text_width) / 2
+        if text and "\n" not in text:
+            page.insert_text(fitz.Point(max(x0, 0), min(rect.y0 + fontsize, page.rect.y1)), text, fontsize=fontsize, fontname=fontname, color=color)
+        elif text:
+            page.insert_textbox(rect, text, fontsize=fontsize, fontname=fontname, color=color, align=align)
+        if _truthy(item.get("underline")):
+            y = min(rect.y0 + fontsize * 1.15, rect.y1)
+            page.draw_line(fitz.Point(x0, y), fitz.Point(x0 + text_width, y), color=color, width=max(fontsize * 0.045, 0.6))
     elif kind in {"rectangle", "highlight"}:
         rect = normalized_rect(page, item)
         fill = html_color(item.get("fill", "#fde047")) if item.get("fill") else None
@@ -832,6 +974,34 @@ def draw_annotation(page, item: dict) -> None:
                 shape.draw_line(normalized_point(page, first), normalized_point(page, second))
             shape.finish(color=color, width=max(float(item.get("stroke_width", 2)), 0.5), stroke_opacity=opacity)
             shape.commit()
+    elif kind in {"line", "arrow"}:
+        rect = normalized_rect(page, item)
+        start = fitz.Point(rect.x0, rect.y0)
+        end = fitz.Point(rect.x1, rect.y1)
+        width = max(float(item.get("stroke_width", 2)), 0.5)
+        page.draw_line(start, end, color=color, width=width, stroke_opacity=opacity)
+        if kind == "arrow":
+            angle = math.atan2(end.y - start.y, end.x - start.x)
+            head = max(min(rect.width, rect.height, 22), 9)
+            for offset in (-0.55, 0.55):
+                point = fitz.Point(end.x - head * math.cos(angle + offset), end.y - head * math.sin(angle + offset))
+                page.draw_line(end, point, color=color, width=width, stroke_opacity=opacity)
+    elif kind == "image":
+        image_bytes = decode_data_url(item.get("image", ""))
+        if image_bytes:
+            page.insert_image(normalized_rect(page, item), stream=image_bytes, keep_proportion=True, overlay=True)
+    elif kind == "stamp":
+        rect = normalized_rect(page, item)
+        text = str(item.get("text") or "APPROVED")
+        page.draw_rect(rect, color=color, width=max(float(item.get("stroke_width", 2)), 1), stroke_opacity=opacity)
+        fontsize = max(min(rect.height * 0.45, rect.width / max(len(text) * 0.62, 1), 28), 6)
+        text_width = fitz.get_text_length(text, fontname="hebo", fontsize=fontsize)
+        origin = fitz.Point(rect.x0 + max((rect.width - text_width) / 2, 1), rect.y0 + (rect.height + fontsize * 0.72) / 2)
+        page.insert_text(origin, text, fontsize=fontsize, fontname="hebo", color=color)
+    elif kind == "signature_field":
+        rect = normalized_rect(page, item)
+        page.draw_rect(rect, color=(0.12, 0.37, 0.60), fill=(0.84, 0.91, 0.97), width=1, fill_opacity=0.55)
+        page.insert_textbox(rect, "Sign here", fontsize=max(min(rect.height * 0.34, 14), 7), fontname="hebo", color=(0.09, 0.23, 0.45), align=fitz.TEXT_ALIGN_CENTER)
     elif kind == "signature":
         rect = normalized_rect(page, item)
         image_bytes = decode_data_url(item.get("image", ""))
@@ -852,8 +1022,69 @@ def normalized_rect(page, item: dict):
     return fitz.Rect(x, y, min(x + width, page.rect.width), min(y + height, page.rect.height))
 
 
+def normalized_erase_rect(page, item: dict):
+    if not all(key in item for key in ("erase_x", "erase_y", "erase_width", "erase_height")):
+        return normalized_rect(page, item)
+    erase_item = {
+        "x": item["erase_x"],
+        "y": item["erase_y"],
+        "width": item["erase_width"],
+        "height": item["erase_height"],
+    }
+    return normalized_rect(page, erase_item)
+
+
 def normalized_point(page, point):
     return fitz.Point(float(point[0]) * page.rect.width, float(point[1]) * page.rect.height)
+
+
+def add_signature_widgets(path: Path, fields: list[tuple[int, dict]]) -> None:
+    reader = PdfReader(str(path))
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    root = writer._root_object
+    acroform = root.get("/AcroForm")
+    if acroform is None:
+        acroform = DictionaryObject({NameObject("/Fields"): ArrayObject(), NameObject("/SigFlags"): NumberObject(3)})
+        root[NameObject("/AcroForm")] = writer._add_object(acroform)
+    else:
+        acroform = acroform.get_object()
+        if "/Fields" not in acroform:
+            acroform[NameObject("/Fields")] = ArrayObject()
+        acroform[NameObject("/SigFlags")] = NumberObject(3)
+    form_fields = acroform["/Fields"]
+
+    for page_index, item in fields:
+        page = writer.pages[page_index]
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        x0 = float(item.get("x", 0)) * width
+        y_top = float(item.get("y", 0)) * height
+        x1 = min(x0 + max(float(item.get("width", 0)) * width, 1), width)
+        y_bottom = min(y_top + max(float(item.get("height", 0)) * height, 1), height)
+        field = DictionaryObject({
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Widget"),
+            NameObject("/FT"): NameObject("/Sig"),
+            NameObject("/T"): TextStringObject(str(item.get("field_name") or "SignatureFormField")[:200]),
+            NameObject("/Rect"): ArrayObject([FloatObject(x0), FloatObject(height - y_bottom), FloatObject(x1), FloatObject(height - y_top)]),
+            NameObject("/F"): NumberObject(4),
+            NameObject("/P"): page.indirect_reference,
+        })
+        field_ref = writer._add_object(field)
+        annotations = page.get("/Annots")
+        if annotations is None:
+            annotations = ArrayObject()
+            page[NameObject("/Annots")] = annotations
+        else:
+            annotations = annotations.get_object()
+        annotations.append(field_ref)
+        form_fields.append(field_ref)
+
+    temporary = path.with_name(f"{path.stem}.widgets{path.suffix}")
+    with temporary.open("wb") as handle:
+        writer.write(handle)
+    temporary.replace(path)
 
 
 def html_color(value: str):

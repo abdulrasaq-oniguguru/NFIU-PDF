@@ -7,6 +7,39 @@ pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const PDF_TYPE = "application/pdf";
 
+type WatermarkPreviewOptions = {
+  text: string;
+  watermark_font: string;
+  watermark_size: string;
+  watermark_bold: string;
+  watermark_italic: string;
+  watermark_underline: string;
+  watermark_color: string;
+  watermark_position: string;
+  watermark_mosaic: string;
+  watermark_transparency: string;
+  watermark_rotation: string;
+  watermark_from_page: string;
+  watermark_to_page: string;
+};
+
+const watermarkPreviewPositions: Record<string, [number, number]> = {
+  "top-left": [0.2, 0.18],
+  "top-center": [0.5, 0.18],
+  "top-right": [0.8, 0.18],
+  "middle-left": [0.2, 0.5],
+  center: [0.5, 0.5],
+  "middle-right": [0.8, 0.5],
+  "bottom-left": [0.2, 0.82],
+  "bottom-center": [0.5, 0.82],
+  "bottom-right": [0.8, 0.82],
+};
+
+function numericOption(value: string, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(Math.max(parsed, minimum), maximum) : fallback;
+}
+
 async function renderFirstPage(file: File): Promise<string | null> {
   if (file.type.startsWith("image/")) {
     return URL.createObjectURL(file);
@@ -154,6 +187,70 @@ export function SingleFilePreview({ file }: { file: File }) {
     <div className="single-preview">
       <div className="thumb-frame thumb-frame-large">
         {url ? <img src={url} alt={file.name} /> : <FileText size={56} />}
+      </div>
+      <span className="thumb-label">{file.name}</span>
+    </div>
+  );
+}
+
+/** First-page preview with a live watermark overlay matching backend coordinates and styling. */
+export function WatermarkFilePreview({ file, options }: { file: File; options: WatermarkPreviewOptions }) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setUrl(null);
+    renderFirstPage(file).then((result) => {
+      if (active) setUrl(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, [file]);
+
+  const fromPage = numericOption(options.watermark_from_page, 1, 1, 99999);
+  const toPage = numericOption(options.watermark_to_page, 1, fromPage, 99999);
+  const showOnFirstPage = fromPage <= 1 && toPage >= 1;
+  const points = options.watermark_mosaic === "true"
+    ? [0.22, 0.5, 0.78].flatMap((y) => [0.22, 0.5, 0.78].map((x) => [x, y] as [number, number]))
+    : [watermarkPreviewPositions[options.watermark_position] ?? watermarkPreviewPositions.center];
+  const fontSize = numericOption(options.watermark_size, 48, 8, 180);
+  const opacity = numericOption(options.watermark_transparency, 0.18, 0.05, 1);
+  const rotation = numericOption(options.watermark_rotation, 45, -180, 180);
+  const fontFamily = options.watermark_font === "times"
+    ? '"Times New Roman", Times, serif'
+    : options.watermark_font === "courier"
+      ? '"Courier New", Courier, monospace'
+      : 'Arial, Helvetica, sans-serif';
+
+  return (
+    <div className="single-preview">
+      <div className="thumb-frame thumb-frame-large watermark-preview-frame">
+        {url ? <img src={url} alt={file.name} /> : <FileText size={56} />}
+        {url && showOnFirstPage && (
+          <div className="watermark-preview-overlay" aria-hidden="true">
+            {points.map(([x, y], index) => (
+              <span
+                className="watermark-preview-text"
+                key={`${x}-${y}-${index}`}
+                style={{
+                  color: options.watermark_color || "#727272",
+                  fontFamily,
+                  fontSize: `clamp(6px, calc(${fontSize} / 595 * 100cqw), 100px)`,
+                  fontStyle: options.watermark_italic === "true" ? "italic" : "normal",
+                  fontWeight: options.watermark_bold === "true" ? 700 : 400,
+                  left: `${x * 100}%`,
+                  opacity,
+                  textDecoration: options.watermark_underline === "true" ? "underline" : "none",
+                  top: `${y * 100}%`,
+                  transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+                }}
+              >
+                {options.text || "CONFIDENTIAL"}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       <span className="thumb-label">{file.name}</span>
     </div>

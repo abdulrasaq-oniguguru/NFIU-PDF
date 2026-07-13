@@ -27,6 +27,7 @@ import {
   SplitSquareHorizontal,
   Stamp,
   Trash2,
+  Type,
   Underline,
   UploadCloud,
   X,
@@ -34,7 +35,7 @@ import {
 import "./styles.css";
 import nfiuLogo from "./assets/nfiu-logo.jpg";
 import { AnnotationDocument, PdfEditor } from "./PdfEditor";
-import { FileThumbnails, PageThumbnails, SingleFilePreview } from "./PdfThumbnails";
+import { FileThumbnails, PageThumbnails, SingleFilePreview, WatermarkFilePreview } from "./PdfThumbnails";
 import { CropSelection, PdfCropper } from "./PdfCropper";
 import { ImageExtractGallery } from "./ImageExtractGallery";
 
@@ -75,7 +76,7 @@ const optionVisibility: Record<string, string[]> = {
   protect: ["password"],
   unlock: ["password"],
   rotate: ["degrees"],
-  watermark: ["text"],
+  watermark: ["watermark"],
   pdf_to_images: ["dpi"],
   pdf_to_powerpoint: ["dpi"],
   ocr: ["language"],
@@ -90,6 +91,17 @@ const optionVisibility: Record<string, string[]> = {
 };
 
 const pageNumberPositions = ["top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"] as const;
+const watermarkPositions = [
+  "top-left",
+  "top-center",
+  "top-right",
+  "middle-left",
+  "center",
+  "middle-right",
+  "bottom-left",
+  "bottom-center",
+  "bottom-right",
+] as const;
 
 const pageLevelTools = new Set(["split", "delete_pages", "reorder_pages"]);
 
@@ -175,6 +187,19 @@ function App() {
     degrees: "90",
     quality: "balanced",
     text: "CONFIDENTIAL",
+    watermark_font: "helvetica",
+    watermark_size: "48",
+    watermark_bold: "false",
+    watermark_italic: "false",
+    watermark_underline: "false",
+    watermark_color: "#727272",
+    watermark_position: "center",
+    watermark_mosaic: "false",
+    watermark_transparency: "0.18",
+    watermark_rotation: "45",
+    watermark_from_page: "1",
+    watermark_to_page: "1",
+    watermark_layer: "over",
     every: "1",
     pages: "",
     keep_remaining: "false",
@@ -460,20 +485,14 @@ function App() {
               </div>
             </div>
           ) : selectedId === "edit" ? (
-            <div className="workspace">
-              <div className="workspace-main">
-                <PdfEditor file={files[0]} onChange={setAnnotations} />
-              </div>
-              <aside className="workspace-sidebar">
-                <h2>{selected.label}</h2>
-                <p className="sidebar-hint">Use the toolbar to modify or add text, upload images, and annotate.</p>
-                <div className="sidebar-spacer" />
-                <span className={error ? "status error" : "status"}>{error || status}</span>
-                <button type="button" onClick={() => runJob(files)} disabled={isProcessing}>
-                  Save changes
-                </button>
-              </aside>
-            </div>
+            <PdfEditor
+              file={files[0]}
+              onChange={setAnnotations}
+              onSave={() => runJob(files)}
+              status={status}
+              error={error}
+              isProcessing={isProcessing}
+            />
           ) : (
             <div className="workspace">
               <div className="workspace-main">
@@ -481,6 +500,8 @@ function App() {
                   <PdfCropper file={files[0]} value={crop} onChange={setCrop} />
                 ) : selectedId === "extract_images" ? (
                   <ImageExtractGallery file={files[0]} selectedIds={selectedImageIds} onChange={setSelectedImageIds} />
+                ) : selectedId === "watermark" ? (
+                  <WatermarkFilePreview file={files[0]} options={options} />
                 ) : selected.multiple ? (
                   <FileThumbnails files={files} />
                 ) : pageLevelTools.has(selectedId) ? (
@@ -536,10 +557,8 @@ function App() {
                       </div>
                     </div>
                   )}
-                  {visibleOptions.includes("text") && (
-                    <Field label="Watermark text">
-                      <input value={options.text} onChange={(event) => updateOption("text", event.target.value)} />
-                    </Field>
+                  {visibleOptions.includes("watermark") && (
+                    <WatermarkOptions options={options} updateOption={updateOption} />
                   )}
                   {visibleOptions.includes("every") && (
                     <Field label="Pages per split">
@@ -761,6 +780,192 @@ type HtmlOptions = {
   one_long_page: string;
   print_background: string;
 };
+
+type WatermarkOptionsState = Record<
+  | "text"
+  | "watermark_font"
+  | "watermark_size"
+  | "watermark_bold"
+  | "watermark_italic"
+  | "watermark_underline"
+  | "watermark_color"
+  | "watermark_position"
+  | "watermark_mosaic"
+  | "watermark_transparency"
+  | "watermark_rotation"
+  | "watermark_from_page"
+  | "watermark_to_page"
+  | "watermark_layer",
+  string
+>;
+
+function WatermarkOptions({
+  options,
+  updateOption,
+}: {
+  options: WatermarkOptionsState;
+  updateOption: (key: keyof WatermarkOptionsState, value: string) => void;
+}) {
+  return (
+    <div className="watermark-options">
+      <div className="watermark-mode-tabs" aria-label="Watermark type">
+        <button type="button" className="active">
+          <Type size={22} />
+          Place text
+        </button>
+      </div>
+
+      <Field label="Text">
+        <input value={options.text} onChange={(event) => updateOption("text", event.target.value)} />
+      </Field>
+
+      <div className="field">
+        <span>Text format</span>
+        <div className="text-style-row">
+          <select
+            className="text-style-font"
+            value={options.watermark_font}
+            onChange={(event) => updateOption("watermark_font", event.target.value)}
+          >
+            <option value="helvetica">Helvetica</option>
+            <option value="times">Times</option>
+            <option value="courier">Courier</option>
+          </select>
+          <input
+            type="number"
+            min={8}
+            max={180}
+            className="text-style-size"
+            value={options.watermark_size}
+            onChange={(event) => updateOption("watermark_size", event.target.value)}
+          />
+        </div>
+        <div className="text-style-row">
+          <button
+            type="button"
+            className={options.watermark_bold === "true" ? "text-style-toggle active" : "text-style-toggle"}
+            aria-label="Bold"
+            onClick={() => updateOption("watermark_bold", options.watermark_bold === "true" ? "false" : "true")}
+          >
+            <Bold size={16} />
+          </button>
+          <button
+            type="button"
+            className={options.watermark_italic === "true" ? "text-style-toggle active" : "text-style-toggle"}
+            aria-label="Italic"
+            onClick={() => updateOption("watermark_italic", options.watermark_italic === "true" ? "false" : "true")}
+          >
+            <Italic size={16} />
+          </button>
+          <button
+            type="button"
+            className={options.watermark_underline === "true" ? "text-style-toggle active" : "text-style-toggle"}
+            aria-label="Underline"
+            onClick={() => updateOption("watermark_underline", options.watermark_underline === "true" ? "false" : "true")}
+          >
+            <Underline size={16} />
+          </button>
+          <input
+            type="color"
+            className="text-style-color"
+            value={options.watermark_color}
+            onChange={(event) => updateOption("watermark_color", event.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="field">
+        <span>Position</span>
+        <div className="position-picker watermark-position-picker">
+          {[0, 3, 6].map((start) => (
+            <div className="position-row" key={start}>
+              {watermarkPositions.slice(start, start + 3).map((position) => (
+                <button
+                  key={position}
+                  type="button"
+                  aria-label={position.replace("-", " ")}
+                  className={options.watermark_position === position ? "position-dot selected" : "position-dot"}
+                  onClick={() => updateOption("watermark_position", position)}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <label className="field field-checkbox">
+        <input
+          type="checkbox"
+          checked={options.watermark_mosaic === "true"}
+          onChange={(event) => updateOption("watermark_mosaic", event.target.checked ? "true" : "false")}
+        />
+        <span>Mosaic<small>Repeat the watermark across the page</small></span>
+      </label>
+
+      <div className="watermark-two-col">
+        <Field label="Transparency">
+          <select
+            value={options.watermark_transparency}
+            onChange={(event) => updateOption("watermark_transparency", event.target.value)}
+          >
+            <option value="1">No transparency</option>
+            <option value="0.5">50%</option>
+            <option value="0.25">75%</option>
+            <option value="0.18">Recommended</option>
+            <option value="0.1">90%</option>
+          </select>
+        </Field>
+        <Field label="Rotation">
+          <select value={options.watermark_rotation} onChange={(event) => updateOption("watermark_rotation", event.target.value)}>
+            <option value="0">Do not rotate</option>
+            <option value="45">45 degrees</option>
+            <option value="-45">-45 degrees</option>
+            <option value="90">90 degrees</option>
+          </select>
+        </Field>
+      </div>
+
+      <div className="watermark-two-col">
+        <Field label="From page">
+          <input
+            type="number"
+            min={1}
+            value={options.watermark_from_page}
+            onChange={(event) => updateOption("watermark_from_page", event.target.value)}
+          />
+        </Field>
+        <Field label="To page">
+          <input
+            type="number"
+            min={1}
+            value={options.watermark_to_page}
+            onChange={(event) => updateOption("watermark_to_page", event.target.value)}
+          />
+        </Field>
+      </div>
+
+      <div className="field">
+        <span>Layer</span>
+        <div className="watermark-layer-grid">
+          <button
+            type="button"
+            className={options.watermark_layer === "over" ? "active" : ""}
+            onClick={() => updateOption("watermark_layer", "over")}
+          >
+            Over the PDF content
+          </button>
+          <button
+            type="button"
+            className={options.watermark_layer === "under" ? "active" : ""}
+            onClick={() => updateOption("watermark_layer", "under")}
+          >
+            Below the PDF content
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function HtmlToPdfWorkspace({
   options,

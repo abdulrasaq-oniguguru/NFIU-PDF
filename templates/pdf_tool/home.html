@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NFIU PDF</title>
-  <link rel="stylesheet" href="{% static 'pdf_tool/react/main.css' %}">
+  <link rel="stylesheet" href="{% static 'pdf_tool/react/main.css' %}?v={{ asset_version }}">
 </head>
 <body>
   <div id="root"></div>
@@ -13,6 +13,6 @@
     window.PDF_OPERATIONS = {{ operations_json|safe }};
     window.PDF_OPERATION_GROUPS = {{ operation_groups_json|safe }};
   </script>
-  <script type="module" src="{% static 'pdf_tool/react/app.js' %}"></script>
+  <script type="module" src="{% static 'pdf_tool/react/app.js' %}?v={{ asset_version }}"></script>
 </body>
 </html>
