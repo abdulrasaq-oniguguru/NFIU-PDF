@@ -52,7 +52,6 @@ OPERATION_GROUPS = [
         "operations": [
             {"id": "edit", "label": "Edit & Sign PDF", "multiple": False, "description": "Add text, images, shapes or freehand annotations to a PDF document, or sign it."},
             {"id": "watermark", "label": "Watermark", "multiple": False, "description": "Stamp text over your PDF in seconds. Choose the typography, transparency and position."},
-            {"id": "remove_watermark", "label": "Remove Watermark", "multiple": False, "description": "Detect and strip repeated diagonal text or stamped images from a PDF, from this tool or others."},
             {"id": "page_numbers", "label": "Page Numbers", "multiple": False, "description": "Add page numbers into PDFs with ease."},
             {"id": "rotate", "label": "Rotate PDF", "multiple": False, "description": "Rotate your PDFs the way you need them."},
         ],
@@ -66,6 +65,10 @@ OPERATION_GROUPS = [
     },
 ]
 OPERATIONS = [operation for group in OPERATION_GROUPS for operation in group["operations"]]
+HIDDEN_OPERATIONS = [
+    {"id": "remove_watermark", "label": "Remove Watermark", "multiple": False},
+]
+SUPPORTED_OPERATION_IDS = {operation["id"] for operation in [*OPERATIONS, *HIDDEN_OPERATIONS]}
 
 
 @never_cache
@@ -92,7 +95,7 @@ def home(request):
 @require_POST
 def create_job(request):
     operation = request.POST.get("operation", "")
-    if operation not in {item["id"] for item in OPERATIONS}:
+    if operation not in SUPPORTED_OPERATION_IDS:
         return JsonResponse({"error": "Unknown operation"}, status=400)
     files = request.FILES.getlist("files")
     if not files and operation != "html_to_pdf":

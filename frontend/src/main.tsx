@@ -7,7 +7,6 @@ import {
   Crop,
   Download,
   Edit3,
-  EraserIcon,
   FileImage,
   FileLock2,
   FileSpreadsheet,
@@ -132,7 +131,6 @@ const toolIcons: Record<string, React.ElementType> = {
   office_to_pdf: FileUp,
   images_to_pdf: FileImage,
   watermark: Stamp,
-  remove_watermark: EraserIcon,
   page_numbers: FileText,
   ocr: ShieldCheck,
   edit: Edit3,
@@ -160,7 +158,6 @@ const toolColors: Record<string, string> = {
   office_to_pdf: "red",
   images_to_pdf: "violet",
   watermark: "violet",
-  remove_watermark: "violet",
   page_numbers: "blue",
   ocr: "red",
   edit: "green",
@@ -366,7 +363,7 @@ function App() {
           }}
         >
           <span className="logo-mark"><img src={nfiuLogo} alt="NFIU" /></span>
-          <span>NFIU<span>PDF</span></span>
+          <span>NFIU-<span>PDF</span></span>
         </a>
         <nav className="nav">
           {groups.map((group) => (
@@ -766,7 +763,7 @@ function App() {
       )}
 
       <footer id="security" className="footer-simple">
-        <span>NFIU PDF &mdash; LAN only | Temporary job files | Configurable cleanup</span>
+        <span>Copyrights 2026 NFIU-PDF - Designed By NFIU ADD. All Rights Reserved.</span>
       </footer>
     </main>
   );
