@@ -887,11 +887,17 @@ def resolve_binary(*names: str) -> str:
                     return path
 
     if os.name == "nt":
+        local_tools = Path(__file__).resolve().parent.parent / ".tools"
         roots = [
             Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
             Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
         ]
-        candidates = []
+        candidates = [
+            local_tools / "libreoffice" / "program" / "soffice.com",
+            local_tools / "libreoffice" / "program" / "soffice.exe",
+            local_tools / "ghostscript" / "bin" / "gswin64c.exe",
+            local_tools / "tesseract" / "tesseract.exe",
+        ]
         for root in roots:
             candidates.extend(
                 [
