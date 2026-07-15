@@ -4,6 +4,7 @@ from django.contrib import admin
 from django.contrib.admin.sites import AdminSite
 from django.utils import timezone
 
+from .admin_filters import SingleDateFilter
 from .models import Job, JobAuditRecord
 
 
@@ -19,7 +20,12 @@ class JobAdmin(admin.ModelAdmin):
         "created_at",
         "updated_at",
     )
-    list_filter = ("operation", "status", "created_at")
+    list_filter = (
+        "operation",
+        "status",
+        ("created_at", SingleDateFilter),
+    )
+    date_hierarchy = "created_at"
     search_fields = (
         "id",
         "operation",
@@ -57,7 +63,12 @@ class JobAuditRecordAdmin(admin.ModelAdmin):
         "job_created_at",
         "recorded_at",
     )
-    list_filter = ("operation", "status", "recorded_at")
+    list_filter = (
+        "operation",
+        "status",
+        ("job_created_at", SingleDateFilter),
+    )
+    date_hierarchy = "job_created_at"
     search_fields = ("job_id", "operation", "original_filenames", "ip_address", "mac_address")
     readonly_fields = [field.name for field in JobAuditRecord._meta.fields]
 
@@ -71,11 +82,14 @@ class JobAuditRecordAdmin(admin.ModelAdmin):
 def _dashboard_index(self, request, extra_context=None):
     extra_context = extra_context or {}
     today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Jobs today/failed-today are sourced from JobAuditRecord, not Job: the Job
+    # row is deleted by the retention cleanup task after JOB_RETENTION_MINUTES,
+    # so counting against Job undercounts anything older than that window.
     extra_context["nfiu_stats"] = {
-        "jobs_today": Job.objects.filter(created_at__gte=today_start).count(),
+        "jobs_today": JobAuditRecord.objects.filter(job_created_at__gte=today_start).count(),
         "jobs_running": Job.objects.filter(status=Job.Status.RUNNING).count(),
-        "jobs_failed_today": Job.objects.filter(
-            status=Job.Status.FAILED, created_at__gte=today_start
+        "jobs_failed_today": JobAuditRecord.objects.filter(
+            status=Job.Status.FAILED, job_created_at__gte=today_start
         ).count(),
         "audit_records_total": JobAuditRecord.objects.count(),
     }

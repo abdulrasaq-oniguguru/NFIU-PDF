@@ -27,3 +27,10 @@ start-all.ps1
 start-all.bat
 celerybeat-schedule*
 
+# Scratch files (saved reference screenshots/pages, raw logo source already
+# baked into frontend/src/assets/nfiu-logo.jpg) -- not needed on the server.
+ImageIII.png
+Nfiu Logo.png
+seeeeee.html
+seeeeee_files/
+

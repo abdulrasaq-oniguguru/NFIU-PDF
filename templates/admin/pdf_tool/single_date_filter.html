@@ -1,0 +1,20 @@
+{% load i18n %}
+<div class="mb-3">
+    <h5>{% blocktranslate with filter_title=spec.title %}By {{ filter_title }} date{% endblocktranslate %}</h5>
+    <form method="get" style="display: flex; align-items: center; gap: 8px;">
+        {% for key, value in spec.other_params %}
+            <input type="hidden" name="{{ key }}" value="{{ value }}">
+        {% endfor %}
+        <input
+            type="date"
+            name="{{ spec.lookup_kwarg }}"
+            value="{{ spec.lookup_val|default:'' }}"
+            class="form-control form-control-sm"
+            style="max-width: 160px;"
+            onchange="this.form.submit()"
+        >
+        {% if spec.lookup_val %}
+            <a href="?{% for key, value in spec.other_params %}{{ key }}={{ value|urlencode }}&amp;{% endfor %}" title="{% translate 'Clear' %}" style="font-size: 1.1rem; line-height: 1;">&times;</a>
+        {% endif %}
+    </form>
+</div>

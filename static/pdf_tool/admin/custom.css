@@ -1,0 +1,35 @@
+/* Login page logo: the source image is a large square seal; without this the
+   browser renders it at native size (900x900), blowing out the login box. */
+.login-logo {
+  text-align: center;
+}
+
+.login-logo img {
+  max-width: 140px;
+  max-height: 140px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  margin: 0 auto 12px;
+}
+
+/* Top navbar renders with a white background (bg-body) regardless of the
+   navbar-dark tweak, which leaves the white account/logout icon invisible
+   against it. Give it real contrast and label the logout action clearly. */
+#jazzy-navbar {
+  background-color: #1e293b !important;
+}
+
+#jazzy-navbar .nav-link {
+  color: #f1f5f9 !important;
+}
+
+.nav-item.dropdown > a.nav-link.btn::after {
+  content: "Account";
+  margin-left: 6px;
+  font-size: 0.9rem;
+}
+
+#jazzy-usermenu button[type="submit"] {
+  font-weight: 600;
+}

@@ -119,6 +119,7 @@ JAZZMIN_SETTINGS = {
     "login_logo": "pdf_tool/react/nfiu-logo.jpg",
     "welcome_sign": "NFIU-PDF Admin Dashboard",
     "copyright": "NFIU-PDF",
+    "custom_css": "pdf_tool/admin/custom.css",
     "search_model": ["pdf_tool.Job", "pdf_tool.JobAuditRecord"],
     "show_sidebar": True,
     "navigation_expanded": True,

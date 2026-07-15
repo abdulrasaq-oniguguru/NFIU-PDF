@@ -4,6 +4,8 @@ import uuid
 
 from django.db import models
 
+from .operation_catalog import OPERATION_CHOICES
+
 
 class AppendOnlyQuerySet(models.QuerySet):
     def update(self, **kwargs):
@@ -21,8 +23,8 @@ class Job(models.Model):
         FAILED = "failed", "Failed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    operation = models.CharField(max_length=64)
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
+    operation = models.CharField("Operation", max_length=64, choices=OPERATION_CHOICES)
+    status = models.CharField("Status", max_length=16, choices=Status.choices, default=Status.QUEUED)
     options = models.JSONField(default=dict, blank=True)
     error = models.TextField(blank=True)
     original_filenames = models.TextField(blank=True)
@@ -46,8 +48,8 @@ class JobAuditRecord(models.Model):
     """
 
     job_id = models.UUIDField(db_index=True)
-    operation = models.CharField(max_length=64)
-    status = models.CharField(max_length=16)
+    operation = models.CharField("Operation", max_length=64, choices=OPERATION_CHOICES)
+    status = models.CharField("Status", max_length=16, choices=Job.Status.choices)
     original_filenames = models.TextField(blank=True)
     input_files = models.JSONField(default=list, blank=True)
     output_sha256 = models.CharField(max_length=64, blank=True)
