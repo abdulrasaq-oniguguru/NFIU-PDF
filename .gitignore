@@ -25,7 +25,10 @@ tmp/
 # one location's version with another's.
 start-all.ps1
 start-all.bat
+start_services.ps1
 celerybeat-schedule*
+*.log
+*.log.err
 
 # Scratch files (saved reference screenshots/pages, raw logo source already
 # baked into frontend/src/assets/nfiu-logo.jpg) -- not needed on the server.
@@ -33,4 +36,3 @@ ImageIII.png
 Nfiu Logo.png
 seeeeee.html
 seeeeee_files/
-
