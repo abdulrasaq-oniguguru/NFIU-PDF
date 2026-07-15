@@ -81,28 +81,17 @@ button {
   width: 100%;
 }
 
-.nav,
-.nav-actions {
+.nav {
   align-items: center;
   display: flex;
   gap: 28px;
 }
 
-.nav a,
-.nav-actions a {
+.nav a {
   color: var(--ink);
   font-size: 14px;
   font-weight: 800;
   text-decoration: none;
-}
-
-.nav-actions button {
-  background: #f6f6f7;
-  border: 0;
-  border-radius: 8px;
-  color: var(--ink);
-  font-weight: 800;
-  padding: 12px 20px;
 }
 
 .hero {
@@ -1642,8 +1631,7 @@ button {
 }
 
 @media (max-width: 980px) {
-  .nav,
-  .nav-actions {
+  .nav {
     display: none;
   }
 

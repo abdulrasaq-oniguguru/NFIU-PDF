@@ -11,6 +11,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from .models import AnnotationLayer, Job
+from .netinfo import lookup_mac_address
 from .operations import build_image_thumbnail, iter_pdf_images
 from .tasks import process_job
 
@@ -102,13 +103,23 @@ def create_job(request):
         return JsonResponse({"error": "Upload at least one file"}, status=400)
 
     options = read_options(request.POST)
+    ip_address = get_client_ip(request)
+    mac_address = lookup_mac_address(ip_address)
+    user_agent = request.META.get("HTTP_USER_AGENT", "")[:2000]
     if operation == "edit":
         stamp_signatures(options)
         options["audit_context"] = {
-            "ip_address": get_client_ip(request),
-            "user_agent": request.META.get("HTTP_USER_AGENT", "")[:2000],
+            "ip_address": ip_address,
+            "user_agent": user_agent,
         }
-    job = Job.objects.create(operation=operation, options=options)
+    job = Job.objects.create(
+        operation=operation,
+        options=options,
+        original_filenames=", ".join(Path(uploaded.name).name for uploaded in files),
+        ip_address=ip_address,
+        mac_address=mac_address,
+        user_agent=user_agent,
+    )
     if operation == "edit":
         AnnotationLayer.objects.create(job=job, document=options.get("annotations", {}))
     input_dir = Path(settings.MEDIA_ROOT) / "jobs" / str(job.id) / "input"
@@ -199,8 +210,11 @@ def read_options(post_data) -> dict:
 
 
 def get_client_ip(request) -> str | None:
-    value = request.META.get("REMOTE_ADDR")
-    return value or None
+    if settings.TRUST_X_FORWARDED_FOR:
+        forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+        if forwarded:
+            return forwarded.split(",")[0].strip() or None
+    return request.META.get("REMOTE_ADDR") or None
 
 
 def stamp_signatures(options: dict) -> None:

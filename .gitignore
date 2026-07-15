@@ -11,8 +11,19 @@ staticfiles/
 .mypy_cache/
 .ruff_cache/
 .idea/
+.claude/
 ScreenShot/
+Screen/
 test_samples/
 base test pdf/
 images/
 nfiu logo.jpg
+tmp/
+
+# Local/per-environment startup scripts and runtime artifacts -- each
+# deployment (dev machine, prod) may have its own; never let git overwrite
+# one location's version with another's.
+start-all.ps1
+start-all.bat
+celerybeat-schedule*
+

@@ -15,6 +15,7 @@ DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
 ALLOWED_HOSTS = ["*"]
 
 INSTALLED_APPS = [
+    "jazzmin",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -87,6 +88,12 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "0") == "1"
+CELERY_BEAT_SCHEDULE = {
+    "cleanup-old-jobs": {
+        "task": "pdf_tool.tasks.cleanup_old_jobs",
+        "schedule": int(os.getenv("JOB_CLEANUP_INTERVAL_MINUTES", "15")) * 60,
+    },
+}
 
 CACHES = {
     "default": {
@@ -96,3 +103,44 @@ CACHES = {
 }
 
 JOB_RETENTION_MINUTES = int(os.getenv("JOB_RETENTION_MINUTES", "60"))
+
+# Only enable this when a trusted reverse proxy (nginx, a load balancer, etc.) sits in front
+# of this app and is configured to overwrite/strip any client-supplied X-Forwarded-For header.
+# With no proxy in front (the default docker-compose/gunicorn setup), REMOTE_ADDR is already
+# the real client IP, and trusting X-Forwarded-For here would let a client spoof its own IP
+# for audit purposes.
+TRUST_X_FORWARDED_FOR = os.getenv("TRUST_X_FORWARDED_FOR", "0") == "1"
+
+JAZZMIN_SETTINGS = {
+    "site_title": "NFIU-PDF Admin",
+    "site_header": "NFIU-PDF",
+    "site_brand": "NFIU-PDF",
+    "site_logo": "pdf_tool/react/nfiu-logo.jpg",
+    "login_logo": "pdf_tool/react/nfiu-logo.jpg",
+    "welcome_sign": "NFIU-PDF Admin Dashboard",
+    "copyright": "NFIU-PDF",
+    "search_model": ["pdf_tool.Job", "pdf_tool.JobAuditRecord"],
+    "show_sidebar": True,
+    "navigation_expanded": True,
+    "order_with_respect_to": ["pdf_tool", "pdf_tool.Job", "pdf_tool.JobAuditRecord"],
+    "icons": {
+        "auth": "fas fa-users-cog",
+        "auth.user": "fas fa-user",
+        "auth.Group": "fas fa-users",
+        "pdf_tool.Job": "fas fa-file-pdf",
+        "pdf_tool.JobAuditRecord": "fas fa-shield-alt",
+        "pdf_tool.SignatureAuditLog": "fas fa-signature",
+        "pdf_tool.AnnotationLayer": "fas fa-pen",
+    },
+    "default_icon_parents": "fas fa-chevron-circle-right",
+    "default_icon_children": "fas fa-circle",
+    "default_theme_mode": "auto",
+}
+
+JAZZMIN_UI_TWEAKS = {
+    "theme": "flatly",
+    "navbar": "navbar-dark",
+    "sidebar": "sidebar-dark-primary",
+    "brand_colour": "navbar-dark",
+    "accent": "accent-primary",
+}

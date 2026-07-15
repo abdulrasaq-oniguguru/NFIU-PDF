@@ -25,13 +25,45 @@ class Job(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
     options = models.JSONField(default=dict, blank=True)
     error = models.TextField(blank=True)
+    original_filenames = models.TextField(blank=True)
     result_name = models.CharField(max_length=255, blank=True)
     result_path = models.CharField(max_length=500, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    mac_address = models.CharField(max_length=17, blank=True)
+    user_agent = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self) -> str:
         return f"{self.operation} {self.id} ({self.status})"
+
+
+class JobAuditRecord(models.Model):
+    """Permanent record of a job's outcome, kept after the job (and its files) are cleaned up.
+
+    Deliberately does not store the document itself -- only hashes/sizes/metadata -- so we
+    retain proof of what was processed without retaining the content.
+    """
+
+    job_id = models.UUIDField(db_index=True)
+    operation = models.CharField(max_length=64)
+    status = models.CharField(max_length=16)
+    original_filenames = models.TextField(blank=True)
+    input_files = models.JSONField(default=list, blank=True)
+    output_sha256 = models.CharField(max_length=64, blank=True)
+    output_size_bytes = models.BigIntegerField(null=True, blank=True)
+    error = models.TextField(blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    mac_address = models.CharField(max_length=17, blank=True)
+    user_agent = models.TextField(blank=True)
+    job_created_at = models.DateTimeField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-recorded_at"]
+
+    def __str__(self) -> str:
+        return f"{self.operation} {self.job_id} ({self.status})"
 
 
 class AnnotationLayer(models.Model):

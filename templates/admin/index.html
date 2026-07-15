@@ -1,0 +1,47 @@
+{% extends "admin/index.html" %}
+{% load i18n %}
+
+{% block content %}
+    <div class="col-12">
+        <div class="row">
+            <div class="col-md-3 col-sm-6 col-12">
+                <div class="small-box bg-info">
+                    <div class="inner">
+                        <h3>{{ nfiu_stats.jobs_today }}</h3>
+                        <p>{% trans "Jobs today" %}</p>
+                    </div>
+                    <div class="icon"><i class="fas fa-file-pdf"></i></div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6 col-12">
+                <div class="small-box bg-warning">
+                    <div class="inner">
+                        <h3>{{ nfiu_stats.jobs_running }}</h3>
+                        <p>{% trans "Jobs running" %}</p>
+                    </div>
+                    <div class="icon"><i class="fas fa-spinner"></i></div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6 col-12">
+                <div class="small-box bg-danger">
+                    <div class="inner">
+                        <h3>{{ nfiu_stats.jobs_failed_today }}</h3>
+                        <p>{% trans "Failed today" %}</p>
+                    </div>
+                    <div class="icon"><i class="fas fa-exclamation-triangle"></i></div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6 col-12">
+                <div class="small-box bg-success">
+                    <div class="inner">
+                        <h3>{{ nfiu_stats.audit_records_total }}</h3>
+                        <p>{% trans "Audit records" %}</p>
+                    </div>
+                    <div class="icon"><i class="fas fa-shield-alt"></i></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {{ block.super }}
+{% endblock %}

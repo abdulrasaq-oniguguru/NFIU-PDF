@@ -84,6 +84,17 @@ celery -A config worker -l INFO --pool=solo
 
 `--pool=solo` is required on Windows — the default prefork pool isn't supported there.
 
+### 4. Start Celery beat (terminal 3)
+
+```powershell
+.venv\Scripts\Activate.ps1
+celery -A config beat -l INFO
+```
+
+Runs `cleanup_old_jobs` on a schedule (`JOB_CLEANUP_INTERVAL_MINUTES`, default every 15 minutes)
+so job files/rows past `JOB_RETENTION_MINUTES` actually get deleted. Without this running, old
+uploads and results accumulate on disk indefinitely.
+
 Open **http://127.0.0.1:8000**.
 
 ---

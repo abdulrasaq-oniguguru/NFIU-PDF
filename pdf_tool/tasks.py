@@ -8,7 +8,9 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 
-from .models import Job, SignatureAuditLog
+from django.db.models import ProtectedError
+
+from .models import Job, JobAuditRecord, SignatureAuditLog
 from .operations import OperationError, run_operation
 from playwright.sync_api import Error as PlaywrightError
 
@@ -34,12 +36,14 @@ def process_job(job_id: str) -> None:
         job.status = Job.Status.FAILED
         job.error = str(exc)
         job.save(update_fields=["status", "error", "updated_at"])
+        record_job_audit(job, files)
         return
 
     job.status = Job.Status.DONE
     job.result_name = build_result_name(files[0].name if files else "file", result)
     job.result_path = str(result.relative_to(settings.MEDIA_ROOT))
     job.save(update_fields=["status", "result_name", "result_path", "updated_at"])
+    record_job_audit(job, files, result)
 
 
 def build_result_name(original_filename: str, result: Path) -> str:
@@ -87,6 +91,26 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def record_job_audit(job: Job, files: list[Path], result: Path | None = None) -> None:
+    JobAuditRecord.objects.create(
+        job_id=job.id,
+        operation=job.operation,
+        status=job.status,
+        original_filenames=job.original_filenames,
+        input_files=[
+            {"name": path.name, "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
+            for path in files
+        ],
+        output_sha256=sha256_file(result) if result else "",
+        output_size_bytes=result.stat().st_size if result else None,
+        error=job.error,
+        ip_address=job.ip_address,
+        mac_address=job.mac_address,
+        user_agent=job.user_agent,
+        job_created_at=job.created_at,
+    )
+
+
 @shared_task
 def cleanup_old_jobs() -> int:
     cutoff = timezone.now() - timezone.timedelta(minutes=settings.JOB_RETENTION_MINUTES)
@@ -95,6 +119,9 @@ def cleanup_old_jobs() -> int:
     for job in old_jobs:
         job_dir = Path(settings.MEDIA_ROOT) / "jobs" / str(job.id)
         shutil.rmtree(job_dir, ignore_errors=True)
-        job.delete()
+        try:
+            job.delete()
+        except ProtectedError:
+            continue
         count += 1
     return count

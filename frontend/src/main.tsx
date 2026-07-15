@@ -380,10 +380,6 @@ function App() {
             </a>
           ))}
         </nav>
-        <div className="nav-actions">
-          <a href="#support">Contact us</a>
-          <button type="button">Log in</button>
-        </div>
       </header>
 
       {screen === "home" ? (
