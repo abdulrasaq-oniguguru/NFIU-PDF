@@ -1589,6 +1589,44 @@ button {
   gap: 16px;
 }
 
+.rename-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, 100%);
+}
+
+.rename-row label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.rename-input {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  overflow: hidden;
+}
+
+.rename-input input {
+  border: 0;
+  flex: 1;
+  font-size: 15px;
+  min-width: 0;
+  outline: none;
+  padding: 11px 12px;
+}
+
+.rename-ext {
+  background: #f6f6f7;
+  border-left: 1px solid var(--line);
+  color: #555;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 11px 12px;
+}
+
 .back-circle {
   align-items: center;
   background: #f6f6f7;

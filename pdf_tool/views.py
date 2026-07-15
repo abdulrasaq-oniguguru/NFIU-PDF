@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import fitz
@@ -39,6 +40,7 @@ OPERATION_GROUPS = [
             {"id": "pdf_to_word", "label": "PDF to Word", "multiple": False, "description": "Convert your PDF files into easy to edit DOC and DOCX documents."},
             {"id": "word_to_pdf", "label": "Word to PDF", "multiple": False, "description": "Make DOC and DOCX files easy to read by converting them to PDF."},
             {"id": "pdf_to_excel", "label": "PDF to Excel", "multiple": False, "description": "Pull data straight from PDFs into Excel spreadsheets in a few short seconds."},
+            {"id": "word_to_excel", "label": "Word to Excel", "multiple": False, "description": "Extract Word document text and tables into an Excel spreadsheet."},
             {"id": "excel_to_pdf", "label": "Excel to PDF", "multiple": False, "description": "Make Excel spreadsheets easy to read by converting them to PDF."},
             {"id": "pdf_to_powerpoint", "label": "PDF to PowerPoint", "multiple": False, "description": "Turn your PDF files into easy to edit PPT and PPTX slideshows."},
             {"id": "powerpoint_to_pdf", "label": "PowerPoint to PDF", "multiple": False, "description": "Make PPT and PPTX slideshows easy to view by converting them to PDF."},
@@ -179,13 +181,60 @@ def job_status(request, job_id):
     return JsonResponse(payload)
 
 
+class _DeleteAfterDownloadFile:
+    """File wrapper that removes the whole job directory once the response
+    has finished streaming, so the converted document never lingers on disk
+    after the user has downloaded it. Windows cannot delete an open file, so
+    cleanup has to run in close(), after the handle is released."""
+
+    def __init__(self, path: Path, cleanup_dir: Path):
+        self._file = path.open("rb")
+        self._cleanup_dir = cleanup_dir
+        self.closed = False
+
+    def read(self, size=-1):
+        return self._file.read(size)
+
+    def seek(self, offset, whence=0):
+        return self._file.seek(offset, whence)
+
+    def tell(self):
+        return self._file.tell()
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self._file.close()
+            shutil.rmtree(self._cleanup_dir, ignore_errors=True)
+
+
 @require_GET
 def download_job(request, job_id):
     job = get_object_or_404(Job, id=job_id, status=Job.Status.DONE)
     result_path = Path(settings.MEDIA_ROOT) / job.result_path
     if not result_path.exists():
         raise Http404("Result file was cleaned up")
-    return FileResponse(result_path.open("rb"), as_attachment=True, filename=job.result_name)
+    job_dir = Path(settings.MEDIA_ROOT) / "jobs" / str(job.id)
+    filename = sanitize_download_name(request.GET.get("filename"), job.result_name)
+    return FileResponse(
+        _DeleteAfterDownloadFile(result_path, job_dir),
+        as_attachment=True,
+        filename=filename,
+    )
+
+
+def sanitize_download_name(requested: str | None, default_name: str) -> str:
+    """Use the caller-chosen filename, stripped of path tricks and control
+    characters, always keeping the real result extension so the downloaded
+    file still opens in the right application."""
+    if not requested:
+        return default_name
+    stem = Path(requested.replace("\\", "/")).name
+    stem = "".join(ch for ch in stem if ch.isprintable() and ch not in '<>:"/|?*')
+    stem = Path(stem).stem.strip().strip(".")
+    if not stem:
+        return default_name
+    return f"{stem[:150]}{Path(default_name).suffix}"
 
 
 def read_options(post_data) -> dict:

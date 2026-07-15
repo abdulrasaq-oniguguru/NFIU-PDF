@@ -123,6 +123,7 @@ const toolIcons: Record<string, React.ElementType> = {
   pdf_to_word: FileText,
   word_to_pdf: FileUp,
   pdf_to_excel: FileSpreadsheet,
+  word_to_excel: FileSpreadsheet,
   excel_to_pdf: FileUp,
   pdf_to_powerpoint: FileType,
   powerpoint_to_pdf: FileUp,
@@ -150,6 +151,7 @@ const toolColors: Record<string, string> = {
   pdf_to_word: "blue",
   word_to_pdf: "blue",
   pdf_to_excel: "green",
+  word_to_excel: "green",
   excel_to_pdf: "green",
   pdf_to_powerpoint: "orange",
   powerpoint_to_pdf: "orange",
@@ -174,7 +176,8 @@ function App() {
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState("Idle");
   const [error, setError] = useState("");
-  const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
+  const [download, setDownload] = useState<{ url: string; name: string; stem: string; ext: string } | null>(null);
+  const [downloadName, setDownloadName] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [annotations, setAnnotations] = useState<AnnotationDocument>({ version: 1, pages: [] });
   const [crop, setCrop] = useState<CropSelection>({ x: 0, y: 0, width: 0, height: 0, page: 1, scope: "all" });
@@ -315,36 +318,70 @@ function App() {
     );
     fileList.forEach((file) => formData.append("files", file));
 
-    const response = await fetch("/jobs/", {
-      method: "POST",
-      body: formData,
-      headers: { "X-CSRFToken": getCookie("csrftoken") },
-    });
-    const data = (await response.json()) as JobResponse;
-    if (!response.ok) {
-      setError(data.error || "Upload failed");
+    let data: JobResponse;
+    try {
+      const response = await fetch("/jobs/", {
+        method: "POST",
+        body: formData,
+        headers: { "X-CSRFToken": getCookie("csrftoken") },
+      });
+      data = (await response.json()) as JobResponse;
+      if (!response.ok) {
+        setError(withSupport(data.error || "Upload failed"));
+        setStatus("Failed");
+        setIsProcessing(false);
+        return;
+      }
+    } catch {
+      setError(withSupport("Could not reach the server. Please check your connection and try again."));
       setStatus("Failed");
       setIsProcessing(false);
       return;
     }
-    pollJob(data.id);
+    pollJob(data.id, 0, Date.now());
   }
 
-  async function pollJob(jobId: string) {
-    const response = await fetch(`/jobs/${jobId}/`);
-    const data = (await response.json()) as JobResponse;
+  async function pollJob(jobId: string, failedAttempts: number, startedAt: number) {
+    if (Date.now() - startedAt >= 5 * 60 * 1000) {
+      setError(withSupport("Processing took too long and was stopped. Please try a smaller or simpler file."));
+      setStatus("Failed");
+      setIsProcessing(false);
+      return;
+    }
+    let data: JobResponse;
+    try {
+      const response = await fetch(`/jobs/${jobId}/`);
+      if (!response.ok) throw new Error(`status ${response.status}`);
+      data = (await response.json()) as JobResponse;
+    } catch {
+      // Transient network blips shouldn't kill the job on screen -- retry a
+      // few times with a longer delay before giving up with a clear message.
+      if (failedAttempts + 1 >= 5) {
+        setError(withSupport("Lost contact with the server while processing your file."));
+        setStatus("Failed");
+        setIsProcessing(false);
+        return;
+      }
+      window.setTimeout(() => pollJob(jobId, failedAttempts + 1, startedAt), 3000);
+      return;
+    }
     setStatus(titleCase(data.status));
     if (data.status === "done" && data.download_url) {
-      setDownload({ url: data.download_url, name: data.result_name || "Download result" });
+      const resultName = data.result_name || "converted";
+      const dotIndex = resultName.lastIndexOf(".");
+      const stem = dotIndex > 0 ? resultName.slice(0, dotIndex) : resultName;
+      const ext = dotIndex > 0 ? resultName.slice(dotIndex) : "";
+      setDownload({ url: data.download_url, name: resultName, stem, ext });
+      setDownloadName(stem);
       setIsProcessing(false);
       return;
     }
     if (data.status === "failed") {
-      setError(data.error || "Processing failed");
+      setError(withSupport(data.error || "Processing failed"));
       setIsProcessing(false);
       return;
     }
-    window.setTimeout(() => pollJob(jobId), 1200);
+    window.setTimeout(() => pollJob(jobId, 0, startedAt), 1200);
   }
 
   function updateOption(key: keyof typeof options, value: string) {
@@ -440,12 +477,28 @@ function App() {
           {download ? (
             <div className="result-card">
               <h2>Your file is ready</h2>
+              <div className="rename-row">
+                <label htmlFor="download-name">Name your file</label>
+                <div className="rename-input">
+                  <input
+                    id="download-name"
+                    type="text"
+                    value={downloadName}
+                    onChange={(event) => setDownloadName(event.target.value)}
+                    placeholder="File name"
+                  />
+                  <span className="rename-ext">{download.ext}</span>
+                </div>
+              </div>
               <div className="result-actions">
                 <button type="button" className="back-circle" onClick={resetToUpload} aria-label="Start over">
                   <ArrowLeft size={20} />
                 </button>
-                <a className="download-link download-link-large" href={download.url}>
-                  <Download size={20} /> {download.name}
+                <a
+                  className="download-link download-link-large"
+                  href={`${download.url}?filename=${encodeURIComponent(downloadName.trim() || download.stem)}`}
+                >
+                  <Download size={20} /> Download {(downloadName.trim() || download.stem) + download.ext}
                 </a>
               </div>
             </div>
@@ -1065,6 +1118,10 @@ function formatBytes(bytes: number) {
 
 function titleCase(value: string) {
   return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+}
+
+function withSupport(message: string) {
+  return `${message} If this keeps happening, contact ADD at add@nfiu.gov.ng for support.`;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

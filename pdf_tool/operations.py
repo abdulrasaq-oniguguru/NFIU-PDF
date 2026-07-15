@@ -14,6 +14,10 @@ from pathlib import Path
 import fitz
 import pdf2docx.text.TextSpan as _pdf2docx_textspan
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from pdf2docx import Converter
 from pptx import Presentation
 from pptx.util import Inches
@@ -751,17 +755,72 @@ def pdf_to_excel(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
     document = fitz.open(source)
     workbook = Workbook()
-    workbook.remove(workbook.active)
-    for page_index, page in enumerate(document, start=1):
-        sheet = workbook.create_sheet(title=f"Page {page_index}")
-        blocks = page.get_text("blocks")
-        sheet.append(["x0", "y0", "x1", "y1", "text"])
-        for block in blocks:
+    sheet = workbook.active
+    sheet.title = "Content"
+    max_columns = 1
+    for page in document:
+        # Real tables become real rows/columns; remaining text becomes one
+        # cell per line, everything appended to the same single sheet in
+        # reading order.
+        tables = page.find_tables().tables
+        table_areas = [fitz.Rect(table.bbox) for table in tables]
+        items = [(table.bbox[1], "table", table) for table in tables]
+        for block in page.get_text("blocks"):
             text = str(block[4]).strip()
-            if text:
-                sheet.append([block[0], block[1], block[2], block[3], text])
-        sheet.column_dimensions["E"].width = 90
+            if not text:
+                continue
+            rect = fitz.Rect(block[:4])
+            center = fitz.Point((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2)
+            if any(area.contains(center) for area in table_areas):
+                continue
+            items.append((block[1], "text", text))
+        items.sort(key=lambda item: item[0])
+        for _, kind, payload in items:
+            if kind == "table":
+                for table_row in payload.extract():
+                    cells = [str(cell).strip() if cell is not None else "" for cell in table_row]
+                    if any(cells):
+                        sheet.append(cells)
+                        max_columns = max(max_columns, len(cells))
+            else:
+                for line in payload.splitlines():
+                    line = line.strip()
+                    if line:
+                        sheet.append([line])
+        sheet.append([])
     document.close()
+    for column_index in range(1, max_columns + 1):
+        sheet.column_dimensions[get_column_letter(column_index)].width = 40
+    workbook.save(output)
+    return output
+
+
+def word_to_excel(files: list[Path], output: Path, options: dict) -> Path:
+    """Extract Word paragraphs and tables into a single Excel worksheet."""
+    source = single_file(files)
+    if source.suffix.lower() != ".docx":
+        raise OperationError("Word to Excel supports .docx files. Save legacy .doc files as .docx first.")
+
+    document = Document(source)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Content"
+    max_columns = 1
+    for element in document.element.body.iterchildren():
+        if element.tag.endswith("}p"):
+            text = Paragraph(element, document).text.strip()
+            if text:
+                sheet.append([text])
+        elif element.tag.endswith("}tbl"):
+            table = Table(element, document)
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if any(cells):
+                    sheet.append(cells)
+                    max_columns = max(max_columns, len(cells))
+            sheet.append([])
+    for column_index in range(1, max_columns + 1):
+        sheet.column_dimensions[get_column_letter(column_index)].width = 40
     workbook.save(output)
     return output
 
@@ -1201,6 +1260,7 @@ OPERATIONS = {
     "pdf_to_images": ("pdf_images.zip", pdf_to_images),
     "pdf_to_word": ("converted.docx", pdf_to_word),
     "pdf_to_excel": ("converted.xlsx", pdf_to_excel),
+    "word_to_excel": ("converted.xlsx", word_to_excel),
     "pdf_to_powerpoint": ("converted.pptx", pdf_to_powerpoint),
     "office_to_pdf": ("converted.pdf", office_to_pdf),
     "word_to_pdf": ("converted.pdf", word_to_pdf),

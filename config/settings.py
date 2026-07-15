@@ -98,10 +98,17 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "0") == "1"
+JOB_MAX_PROCESSING_MINUTES = int(os.getenv("JOB_MAX_PROCESSING_MINUTES", "5"))
+CELERY_TASK_SOFT_TIME_LIMIT = JOB_MAX_PROCESSING_MINUTES * 60
+CELERY_TASK_TIME_LIMIT = (JOB_MAX_PROCESSING_MINUTES + 1) * 60
 CELERY_BEAT_SCHEDULE = {
     "cleanup-old-jobs": {
         "task": "pdf_tool.tasks.cleanup_old_jobs",
         "schedule": int(os.getenv("JOB_CLEANUP_INTERVAL_MINUTES", "15")) * 60,
+    },
+    "expire-stalled-jobs": {
+        "task": "pdf_tool.tasks.expire_stalled_jobs",
+        "schedule": 60,
     },
 }
 
@@ -113,6 +120,19 @@ CACHES = {
 }
 
 JOB_RETENTION_MINUTES = int(os.getenv("JOB_RETENTION_MINUTES", "60"))
+
+# Error reporting: unhandled server errors (500s) and failed jobs are emailed
+# to the support inbox. Django's default logging already mails ADMINS on
+# request errors when DEBUG=0. They are delivered through NFIU's internal
+# HTTP mail service instead of direct SMTP.
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "add@nfiu.gov.ng")
+ADMINS = [("NFIU ADD", SUPPORT_EMAIL)]
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", "nfiu-pdf-alerts@nfiu.gov.ng")
+DEFAULT_FROM_EMAIL = SERVER_EMAIL
+MAIL_SERVER_URL = os.getenv("MAIL_SERVER_URL", "http://10.16.21.115:42334/mail")
+MAIL_APP_NAME = os.getenv("MAIL_APP_NAME", "NFIU PDF Tool")
+EMAIL_BACKEND = "pdf_tool.mail_backend.HttpMailBackend"
+EMAIL_TIMEOUT = 10
 
 # Only enable this when a trusted reverse proxy (nginx, a load balancer, etc.) sits in front
 # of this app and is configured to overwrite/strip any client-supplied X-Forwarded-For header.

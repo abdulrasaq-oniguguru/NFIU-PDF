@@ -14,6 +14,7 @@ OPERATION_LABELS = {
     "pdf_to_word": "PDF to Word",
     "word_to_pdf": "Word to PDF",
     "pdf_to_excel": "PDF to Excel",
+    "word_to_excel": "Word to Excel",
     "excel_to_pdf": "Excel to PDF",
     "pdf_to_powerpoint": "PDF to PowerPoint",
     "powerpoint_to_pdf": "PowerPoint to PDF",
