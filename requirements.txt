@@ -3,6 +3,7 @@ django-jazzmin==3.0.5
 celery==5.4.0
 redis==5.2.1
 gunicorn==23.0.0
+whitenoise==6.8.2
 pypdf==5.1.0
 cryptography>=3.1
 pdf2docx==0.5.8

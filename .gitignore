@@ -25,5 +25,7 @@ tmp/
 # one location's version with another's.
 start-all.ps1
 start-all.bat
+start_services.ps1
 celerybeat-schedule*
-
+*.log
+*.log.err
