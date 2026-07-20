@@ -411,8 +411,24 @@ button {
 
 .watermark-mode-tabs {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
   margin: -4px 0 2px;
+}
+
+.watermark-logo-preview {
+  display: flex;
+  justify-content: center;
+  padding: 10px;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.watermark-logo-preview img {
+  max-width: 100%;
+  max-height: 120px;
+  object-fit: contain;
 }
 
 .workspace-sidebar .watermark-mode-tabs button {
@@ -1505,6 +1521,26 @@ button {
   font-size: 22px;
   letter-spacing: 0;
   margin: 0 0 18px;
+}
+
+.tool-notice {
+  align-items: flex-start;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  line-height: 1.45;
+  margin: 0 0 18px;
+  padding: 12px 14px;
+}
+
+.tool-notice svg {
+  color: var(--brand);
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .sidebar-hint {

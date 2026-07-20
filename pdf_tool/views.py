@@ -253,7 +253,9 @@ def read_options(post_data) -> dict:
         "watermark_underline", "watermark_color", "watermark_position", "watermark_mosaic",
         "watermark_transparency", "watermark_rotation", "watermark_from_page",
         "watermark_to_page", "watermark_layer",
+        "watermark_mode", "watermark_image", "watermark_image_scale",
         "url", "screen_width", "page_size", "orientation", "one_long_page", "print_background",
+        "pptx_mode",
     }
     return {key: value for key, value in options.items() if key in allowed}
 

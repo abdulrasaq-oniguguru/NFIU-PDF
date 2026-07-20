@@ -2,7 +2,7 @@ import json
 import base64
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import fitz
 from django.conf import settings
@@ -11,10 +11,24 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from openpyxl import load_workbook
 from docx import Document as WordDocument
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from playwright.sync_api import Error as PlaywrightError
 
 from . import mail_backend
 from .models import Job, SignatureAuditLog
-from .operations import flatten_edits, pdf_to_excel, remove_watermark_pdf, watermark_pdf, word_to_excel
+from .operations import (
+    _allow_browser_request,
+    compress_pdf,
+    flatten_edits,
+    html_to_pdf,
+    ocr_pdf,
+    pdf_to_excel,
+    pdf_to_powerpoint,
+    remove_watermark_pdf,
+    watermark_pdf,
+    word_to_excel,
+)
 from .tasks import expire_stalled_jobs, process_job
 from .views import read_options, sanitize_download_name
 
@@ -35,10 +49,62 @@ class WatermarkTests(TestCase):
             "watermark_from_page": "1",
             "watermark_to_page": "2",
             "watermark_layer": "under",
+            "watermark_mode": "image",
+            "watermark_image": "data:image/png;base64,AA==",
+            "watermark_image_scale": "35",
         }
         post = QueryDict(mutable=True)
         post["options"] = json.dumps(expected)
         self.assertEqual(read_options(post), expected)
+
+    def test_text_watermark_defaults_to_every_page(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            output = Path(directory) / "watermarked.pdf"
+            document = fitz.open()
+            for page_number in range(1, 4):
+                page = document.new_page(width=595, height=842)
+                page.insert_text((72, 72), f"PAGE {page_number}")
+            document.save(source)
+            document.close()
+
+            watermark_pdf(
+                [source],
+                output,
+                {"text": "ALL PAGES", "watermark_rotation": "0", "watermark_transparency": "1"},
+            )
+
+            with fitz.open(output) as result:
+                self.assertEqual(["ALL PAGES" in page.get_text() for page in result], [True, True, True])
+
+    def test_logo_watermark_applies_only_to_selected_pages(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            output = Path(directory) / "watermarked.pdf"
+            document = fitz.open()
+            for _ in range(3):
+                document.new_page(width=595, height=842)
+            document.save(source)
+            document.close()
+            pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 80, 40), False)
+            pixmap.clear_with(0x176B47)
+            image_data = "data:image/png;base64," + base64.b64encode(pixmap.tobytes("png")).decode("ascii")
+
+            watermark_pdf(
+                [source],
+                output,
+                {
+                    "watermark_mode": "image",
+                    "watermark_image": image_data,
+                    "watermark_from_page": "2",
+                    "watermark_to_page": "3",
+                    "watermark_rotation": "0",
+                    "watermark_transparency": "1",
+                },
+            )
+
+            with fitz.open(output) as result:
+                self.assertEqual([len(page.get_images(full=True)) for page in result], [0, 1, 1])
 
     def test_watermark_pdf_applies_size_color_and_font(self):
         with TemporaryDirectory() as directory:
@@ -142,6 +208,108 @@ class WatermarkTests(TestCase):
                 self.assertIn("PRESERVE UNDER WATERMARK", text)
 
 
+class HtmlToPdfTests(TestCase):
+    def test_inline_browser_resources_are_allowed_without_network_validation(self):
+        with patch("pdf_tool.operations._public_web_url") as validate:
+            _allow_browser_request("data:image/png;base64,AA==")
+            _allow_browser_request("blob:https://example.com/asset-id")
+            _allow_browser_request("about:blank")
+        validate.assert_not_called()
+
+    def test_busy_page_still_converts_after_bounded_settle_timeout(self):
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "webpage.pdf"
+            manager = MagicMock()
+            playwright = manager.__enter__.return_value
+            browser = playwright.chromium.launch.return_value
+            page = browser.new_page.return_value
+            response = MagicMock(ok=True, status=200)
+            page.goto.return_value = response
+            page.wait_for_load_state.side_effect = PlaywrightError("page remained busy")
+
+            with (
+                patch("pdf_tool.operations.sync_playwright", return_value=manager),
+                patch("pdf_tool.operations._public_web_url", return_value="https://example.com/report"),
+            ):
+                html_to_pdf([], output, {"url": "https://example.com/report", "print_background": "true"})
+
+            page.goto.assert_called_once_with(
+                "https://example.com/report",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+            page.wait_for_timeout.assert_called_once_with(1000)
+            page.pdf.assert_called_once()
+            browser.close.assert_called_once()
+
+    def test_browser_is_closed_when_pdf_rendering_fails(self):
+        with TemporaryDirectory() as directory:
+            manager = MagicMock()
+            playwright = manager.__enter__.return_value
+            browser = playwright.chromium.launch.return_value
+            page = browser.new_page.return_value
+            page.goto.return_value = MagicMock(ok=True, status=200)
+            page.pdf.side_effect = RuntimeError("render failed")
+
+            with (
+                patch("pdf_tool.operations.sync_playwright", return_value=manager),
+                patch("pdf_tool.operations._public_web_url", return_value="https://example.com/report"),
+                self.assertRaises(RuntimeError),
+            ):
+                html_to_pdf([], Path(directory) / "webpage.pdf", {"url": "https://example.com/report"})
+
+            browser.close.assert_called_once()
+
+
+class CompressionTests(TestCase):
+    def test_image_compression_forces_downsampling_and_jpeg_reencoding(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            output = Path(directory) / "compressed.pdf"
+            source.write_bytes(b"source-pdf" * 100)
+
+            def create_compressed(command, check):
+                self.assertTrue(check)
+                output.write_bytes(b"smaller")
+                return MagicMock(returncode=0)
+
+            with (
+                patch("pdf_tool.operations.resolve_binary", return_value="gs"),
+                patch("pdf_tool.operations.subprocess.run", side_effect=create_compressed) as run,
+            ):
+                compress_pdf([source], output, {"quality": "balanced"})
+
+            command = run.call_args.args[0]
+            self.assertIn("-dColorImageDownsampleThreshold=1.0", command)
+            self.assertIn("-dGrayImageDownsampleThreshold=1.0", command)
+            self.assertIn("-dMonoImageDownsampleThreshold=1.0", command)
+            self.assertIn("-dColorImageFilter=/DCTEncode", command)
+            self.assertIn("-dGrayImageFilter=/DCTEncode", command)
+            self.assertLess(output.stat().st_size, source.stat().st_size)
+
+
+class OcrTests(TestCase):
+    def test_ocr_uses_resolved_command_and_dependency_environment(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            output = Path(directory) / "searchable.pdf"
+            source.write_bytes(b"pdf fixture")
+            completed = MagicMock(returncode=0, stderr="", stdout="")
+            with (
+                patch("pdf_tool.operations._ocrmypdf_command", return_value=["python", "-m", "ocrmypdf"]),
+                patch("pdf_tool.operations._ocr_environment", return_value={"PATH": "ocr-tools"}),
+                patch("pdf_tool.operations.subprocess.run", return_value=completed) as run,
+            ):
+                ocr_pdf([source], output, {"language": "eng"})
+
+            run.assert_called_once_with(
+                ["python", "-m", "ocrmypdf", "-l", "eng", "--skip-text", str(source), str(output)],
+                env={"PATH": "ocr-tools"},
+                capture_output=True,
+                text=True,
+            )
+
+
 class FlattenEditsTests(TestCase):
     def test_replaces_existing_text_using_original_text_bounds(self):
         with TemporaryDirectory() as directory:
@@ -215,6 +383,54 @@ class FlattenEditsTests(TestCase):
                 self.assertIn("Approved", result[0].get_text())
                 self.assertIn("APPROVED", result[0].get_text())
                 self.assertEqual([widget.field_name for widget in result[0].widgets()], ["ApprovalSignature"])
+
+
+class PdfToPowerPointTests(TestCase):
+    def test_editable_mode_retains_text_images_and_vector_graphics(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            output = Path(directory) / "converted.pptx"
+            document = fitz.open()
+            page = document.new_page(width=720, height=405)
+            page.draw_rect(fitz.Rect(60, 80, 300, 250), color=(0, 0, 0), fill=(0.8, 0.9, 1), width=3)
+            page.draw_line((80, 300), (640, 110), color=(1, 0, 0), width=6)
+            page.draw_bezier((80, 330), (220, 150), (480, 360), (640, 180), color=(0, 0.5, 0), width=4)
+            page.insert_text((70, 55), "EDITABLE CHART", fontsize=24)
+            pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 40, 40), False)
+            pixmap.clear_with(0x3366CC)
+            page.insert_image(fitz.Rect(540, 250, 620, 330), pixmap=pixmap)
+            document.save(source)
+            document.close()
+
+            pdf_to_powerpoint([source], output, {"pptx_mode": "editable"})
+
+            deck = Presentation(output)
+            self.assertEqual(len(deck.slides), 1)
+            shapes = list(deck.slides[0].shapes)
+            shape_types = [shape.shape_type for shape in shapes]
+            self.assertIn(MSO_SHAPE_TYPE.AUTO_SHAPE, shape_types)
+            self.assertIn(MSO_SHAPE_TYPE.LINE, shape_types)
+            self.assertIn(MSO_SHAPE_TYPE.FREEFORM, shape_types)
+            self.assertIn(MSO_SHAPE_TYPE.PICTURE, shape_types)
+            self.assertIn(MSO_SHAPE_TYPE.TEXT_BOX, shape_types)
+            self.assertIn("EDITABLE CHART", "\n".join(shape.text for shape in shapes if shape.has_text_frame))
+
+    def test_exact_image_mode_remains_available(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            output = Path(directory) / "converted.pptx"
+            document = fitz.open()
+            page = document.new_page(width=595, height=842)
+            page.insert_text((72, 72), "EXACT PAGE", fontsize=20)
+            document.save(source)
+            document.close()
+
+            pdf_to_powerpoint([source], output, {"pptx_mode": "image", "dpi": "120"})
+
+            deck = Presentation(output)
+            shapes = list(deck.slides[0].shapes)
+            self.assertEqual(len(shapes), 1)
+            self.assertEqual(shapes[0].shape_type, MSO_SHAPE_TYPE.PICTURE)
 
 
 def draw_bordered_table(page, data, x0=72, y0=140, col_width=140, row_height=24):

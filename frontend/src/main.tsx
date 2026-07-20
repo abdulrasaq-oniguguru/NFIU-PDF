@@ -16,6 +16,7 @@ import {
   Grid3X3,
   Globe2,
   Image,
+  Info,
   Italic,
   LockOpen,
   Monitor,
@@ -77,7 +78,7 @@ const optionVisibility: Record<string, string[]> = {
   rotate: ["degrees"],
   watermark: ["watermark"],
   pdf_to_images: ["dpi"],
-  pdf_to_powerpoint: ["dpi"],
+  pdf_to_powerpoint: ["pptx_mode", "dpi"],
   ocr: ["language"],
   page_numbers: [
     "page_number_mode",
@@ -198,13 +199,17 @@ function App() {
     watermark_transparency: "0.18",
     watermark_rotation: "45",
     watermark_from_page: "1",
-    watermark_to_page: "1",
+    watermark_to_page: "",
     watermark_layer: "over",
+    watermark_mode: "text",
+    watermark_image: "",
+    watermark_image_scale: "30",
     every: "1",
     pages: "",
     keep_remaining: "false",
     margin: "18",
     dpi: "200",
+    pptx_mode: "editable",
     language: "eng",
     page_number_mode: "single",
     page_number_position: "bottom-center",
@@ -563,6 +568,17 @@ function App() {
               <aside className="workspace-sidebar">
                 <h2>{selected.label}</h2>
 
+                {selectedId === "pdf_to_powerpoint" && (
+                  <p className="tool-notice" role="note">
+                    <Info size={16} />
+                    <span>
+                      {options.pptx_mode === "image"
+                        ? "Each PDF page is placed on a slide as a high-resolution image — layout is preserved exactly, but the slides are not editable in PowerPoint."
+                        : "Text and common vector graphics are reconstructed as editable PowerPoint objects, and embedded images are retained. Complex PDF effects may be preserved as images; for a pixel-exact copy, choose “Exact page image” below."}
+                    </span>
+                  </p>
+                )}
+
                 <div className="options-grid">
                   {visibleOptions.includes("password") && (
                     <Field label="Password">
@@ -629,7 +645,15 @@ function App() {
                       </span>
                     </label>
                   )}
-                  {visibleOptions.includes("dpi") && (
+                  {visibleOptions.includes("pptx_mode") && (
+                    <Field label="Slide content">
+                      <select value={options.pptx_mode} onChange={(event) => updateOption("pptx_mode", event.target.value)}>
+                        <option value="editable">Editable text (recommended)</option>
+                        <option value="image">Exact page image</option>
+                      </select>
+                    </Field>
+                  )}
+                  {visibleOptions.includes("dpi") && !(selectedId === "pdf_to_powerpoint" && options.pptx_mode === "editable") && (
                     <Field label="Image DPI">
                       <input type="number" min={72} max={600} value={options.dpi} onChange={(event) => updateOption("dpi", event.target.value)} />
                     </Field>
@@ -841,7 +865,10 @@ type WatermarkOptionsState = Record<
   | "watermark_rotation"
   | "watermark_from_page"
   | "watermark_to_page"
-  | "watermark_layer",
+  | "watermark_layer"
+  | "watermark_mode"
+  | "watermark_image"
+  | "watermark_image_scale",
   string
 >;
 
@@ -855,12 +882,59 @@ function WatermarkOptions({
   return (
     <div className="watermark-options">
       <div className="watermark-mode-tabs" aria-label="Watermark type">
-        <button type="button" className="active">
+        <button
+          type="button"
+          className={options.watermark_mode === "text" ? "active" : ""}
+          onClick={() => updateOption("watermark_mode", "text")}
+        >
           <Type size={22} />
           Place text
         </button>
+        <button
+          type="button"
+          className={options.watermark_mode === "image" ? "active" : ""}
+          onClick={() => updateOption("watermark_mode", "image")}
+        >
+          <Image size={22} />
+          Place logo
+        </button>
       </div>
 
+      {options.watermark_mode === "image" ? (
+        <>
+          <Field label="Logo / image">
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (!file) {
+                  updateOption("watermark_image", "");
+                  return;
+                }
+                const reader = new FileReader();
+                reader.onload = () => updateOption("watermark_image", String(reader.result || ""));
+                reader.readAsDataURL(file);
+              }}
+            />
+          </Field>
+          {options.watermark_image ? (
+            <div className="watermark-logo-preview">
+              <img src={options.watermark_image} alt="Watermark logo preview" />
+            </div>
+          ) : null}
+          <Field label="Logo size (% of page width)">
+            <input
+              type="number"
+              min={5}
+              max={100}
+              value={options.watermark_image_scale}
+              onChange={(event) => updateOption("watermark_image_scale", event.target.value)}
+            />
+          </Field>
+        </>
+      ) : (
+        <>
       <Field label="Text">
         <input value={options.text} onChange={(event) => updateOption("text", event.target.value)} />
       </Field>
@@ -919,6 +993,8 @@ function WatermarkOptions({
           />
         </div>
       </div>
+        </>
+      )}
 
       <div className="field">
         <span>Position</span>
@@ -984,6 +1060,7 @@ function WatermarkOptions({
           <input
             type="number"
             min={1}
+            placeholder="All pages"
             value={options.watermark_to_page}
             onChange={(event) => updateOption("watermark_to_page", event.target.value)}
           />

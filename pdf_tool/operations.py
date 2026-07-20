@@ -7,8 +7,10 @@ import re
 import socket
 import shutil
 import subprocess
+import sys
 import zipfile
 from collections import defaultdict
+from io import BytesIO
 from pathlib import Path
 
 import fitz
@@ -20,7 +22,12 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 from pdf2docx import Converter
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.dml.color import RGBColor
+from pptx.enum.dml import MSO_LINE_DASH_STYLE
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
+from pptx.enum.text import MSO_ANCHOR
+from pptx.oxml.xmlchemy import OxmlElement
+from pptx.util import Emu, Inches, Pt
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, DictionaryObject, FloatObject, NameObject, NumberObject, TextStringObject
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
@@ -60,6 +67,16 @@ def _public_web_url(value: str) -> str:
     return parsed.geturl()
 
 
+def _allow_browser_request(value: str) -> None:
+    from urllib.parse import urlparse
+
+    # These schemes are generated within the already-approved page and cannot
+    # initiate a new request to an internal network address.
+    if urlparse(value).scheme in {"data", "blob", "about"}:
+        return
+    _public_web_url(value)
+
+
 def html_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
     url = _public_web_url(str(options.get("url") or ""))
     width = min(max(int(options.get("screen_width") or 1440), 320), 2560)
@@ -79,34 +96,48 @@ def html_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
                 launch_errors.append(str(exc))
         if browser is None:
             raise OperationError("No Chromium browser is available. Run: playwright install chromium")
-        page = browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
+        try:
+            page = browser.new_page(viewport={"width": width, "height": 900}, device_scale_factor=1)
 
-        def guard(route):
+            def guard(route):
+                try:
+                    _allow_browser_request(route.request.url)
+                    route.continue_()
+                except OperationError:
+                    route.abort()
+
+            page.route("**/*", guard)
+            # The load event can be held open indefinitely by advertisements or
+            # broken third-party resources. DOMContentLoaded gives a stable document,
+            # after which we allow a bounded network-settle period for images/styles.
             try:
-                _public_web_url(route.request.url)
-                route.continue_()
-            except OperationError:
-                route.abort()
-
-        page.route("**/*", guard)
-        response = page.goto(url, wait_until="networkidle", timeout=45000)
-        if not response or not response.ok:
+                response = page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            except PlaywrightError as exc:
+                raise OperationError("The webpage could not be loaded") from exc
+            if not response or not response.ok:
+                status = response.status if response else "no response"
+                raise OperationError(f"The webpage could not be loaded (server returned {status})")
+            try:
+                page.wait_for_load_state("networkidle", timeout=8000)
+            except PlaywrightError:
+                # Busy pages may never become idle; give already-started rendering a
+                # final brief window without turning that into a conversion failure.
+                page.wait_for_timeout(1000)
+            page.emulate_media(media="screen")
+            pdf_options = {
+                "path": str(output),
+                "print_background": _truthy(options.get("print_background", True)),
+                "landscape": landscape,
+                "margin": {"top": "10mm", "right": "10mm", "bottom": "10mm", "left": "10mm"},
+            }
+            if long_page:
+                height = min(max(page.evaluate("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"), 1), 20000)
+                pdf_options.update({"width": f"{width}px", "height": f"{height}px", "margin": {"top": "0", "right": "0", "bottom": "0", "left": "0"}})
+            else:
+                pdf_options["format"] = page_size
+            page.pdf(**pdf_options)
+        finally:
             browser.close()
-            raise OperationError("The webpage could not be loaded")
-        page.emulate_media(media="screen")
-        pdf_options = {
-            "path": str(output),
-            "print_background": _truthy(options.get("print_background", True)),
-            "landscape": landscape,
-            "margin": {"top": "10mm", "right": "10mm", "bottom": "10mm", "left": "10mm"},
-        }
-        if long_page:
-            height = min(max(page.evaluate("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)"), 1), 20000)
-            pdf_options.update({"width": f"{width}px", "height": f"{height}px", "margin": {"top": "0", "right": "0", "bottom": "0", "left": "0"}})
-        else:
-            pdf_options["format"] = page_size
-        page.pdf(**pdf_options)
-        browser.close()
     return output
 
 
@@ -255,10 +286,23 @@ def compress_pdf(files: list[Path], output: Path, options: dict) -> Path:
             "-dBATCH",
             "-dDownsampleColorImages=true",
             f"-dColorImageResolution={profile['dpi']}",
+            # Ghostscript only downsamples when an image's resolution exceeds
+            # (target * threshold); the default threshold of 1.5 leaves moderately
+            # over-resolution scans untouched. A threshold of 1.0 downsamples any
+            # image above the target, which is what actually shrinks image PDFs.
+            "-dColorImageDownsampleThreshold=1.0",
             "-dDownsampleGrayImages=true",
             f"-dGrayImageResolution={profile['dpi']}",
+            "-dGrayImageDownsampleThreshold=1.0",
             "-dDownsampleMonoImages=true",
             f"-dMonoImageResolution={profile['dpi']}",
+            "-dMonoImageDownsampleThreshold=1.0",
+            # Re-encode color/gray images as JPEG so already-embedded images are
+            # recompressed (not just passed through), improving the ratio.
+            "-dAutoFilterColorImages=false",
+            "-dColorImageFilter=/DCTEncode",
+            "-dAutoFilterGrayImages=false",
+            "-dGrayImageFilter=/DCTEncode",
             f"-sOutputFile={output}",
             str(source),
         ],
@@ -382,11 +426,54 @@ def _draw_watermark_text(page, text: str, point: fitz.Point, options: dict) -> N
         )
 
 
+def _load_watermark_image(options: dict) -> bytes:
+    raw = str(options.get("watermark_image") or "")
+    data = decode_data_url(raw)
+    if not data:
+        raise OperationError("Upload a logo or image to use as the watermark")
+    return data
+
+
+def _draw_watermark_image(page, image: bytes, point: fitz.Point, options: dict) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    opacity = _clamp_float(options.get("watermark_transparency"), 0.18, 0.05, 1)
+    rotation = _clamp_float(options.get("watermark_rotation"), 45, -180, 180)
+    scale = _clamp_float(options.get("watermark_image_scale"), 30, 5, 100) / 100
+    overlay = (options.get("watermark_layer") or "over") != "under"
+
+    picture = Image.open(BytesIO(image)).convert("RGBA")
+    if opacity < 1:
+        alpha = picture.getchannel("A").point(lambda value: int(value * opacity))
+        picture.putalpha(alpha)
+    if rotation:
+        # PIL rotates counter-clockwise; negate so positive angles match the text path.
+        picture = picture.rotate(-rotation, expand=True, resample=Image.BICUBIC)
+
+    target_width = page.rect.width * scale
+    target_height = target_width * (picture.height / picture.width)
+    box = fitz.Rect(
+        point.x - target_width / 2,
+        point.y - target_height / 2,
+        point.x + target_width / 2,
+        point.y + target_height / 2,
+    )
+    buffer = BytesIO()
+    picture.save(buffer, format="PNG")
+    page.insert_image(box, stream=buffer.getvalue(), keep_proportion=True, overlay=overlay)
+
+
 def watermark_pdf(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
-    text = str(options.get("text") or "CONFIDENTIAL").strip()
-    if not text:
-        raise OperationError("Enter watermark text")
+    image_mode = (options.get("watermark_mode") or "text") == "image"
+    if image_mode:
+        image_bytes = _load_watermark_image(options)
+    else:
+        text = str(options.get("text") or "CONFIDENTIAL").strip()
+        if not text:
+            raise OperationError("Enter watermark text")
     document = fitz.open(source)
     try:
         first_page = _clamp_int(options.get("watermark_from_page"), 1, 1, len(document))
@@ -395,7 +482,10 @@ def watermark_pdf(files: list[Path], output: Path, options: dict) -> Path:
             page = document[page_index]
             original_streams = set(page.get_contents())
             for point in _watermark_points(page, options):
-                _draw_watermark_text(page, text, point, options)
+                if image_mode:
+                    _draw_watermark_image(page, image_bytes, point, options)
+                else:
+                    _draw_watermark_text(page, text, point, options)
             watermark_streams = [xref for xref in page.get_contents() if xref not in original_streams]
             if watermark_streams:
                 references = " ".join(f"{xref} 0 R" for xref in watermark_streams)
@@ -825,22 +915,286 @@ def word_to_excel(files: list[Path], output: Path, options: dict) -> Path:
     return output
 
 
+EMU_PER_POINT = 12700  # 914400 EMU per inch / 72 points per inch
+
+
+def _pdf_int_color_to_rgb(color: int) -> "RGBColor":
+    color &= 0xFFFFFF
+    return RGBColor((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF)
+
+
+def _pdf_color_to_rgb(color) -> "RGBColor":
+    values = tuple(color or (0, 0, 0))[:3]
+    return RGBColor(*(round(min(max(float(value), 0), 1) * 255) for value in values))
+
+
+def _set_powerpoint_opacity(color_elements, opacity) -> None:
+    if opacity is None or float(opacity) >= 1:
+        return
+    alpha_value = str(round(min(max(float(opacity), 0), 1) * 100000))
+    for color_element in color_elements:
+        for child in list(color_element):
+            if child.tag.endswith("}alpha"):
+                color_element.remove(child)
+        alpha = OxmlElement("a:alpha")
+        alpha.set("val", alpha_value)
+        color_element.append(alpha)
+
+
+def _style_powerpoint_shape(shape, drawing: dict, scale: float, include_fill: bool = True) -> None:
+    stroke = drawing.get("color")
+    if stroke is None:
+        shape.line.fill.background()
+    else:
+        shape.line.color.rgb = _pdf_color_to_rgb(stroke)
+        shape.line.width = Pt(max(float(drawing.get("width") or 1) * scale, 0.25))
+        _set_powerpoint_opacity(
+            shape._element.spPr.xpath("./a:ln/a:solidFill/a:srgbClr"),
+            drawing.get("stroke_opacity"),
+        )
+        dash_match = re.search(r"\[([^]]*)\]", str(drawing.get("dashes") or ""))
+        dash_numbers = [float(value) for value in re.findall(r"[0-9.]+", dash_match.group(1))] if dash_match else []
+        if dash_numbers:
+            shape.line.dash_style = (
+                MSO_LINE_DASH_STYLE.ROUND_DOT
+                if max(dash_numbers) <= 2
+                else MSO_LINE_DASH_STYLE.DASH_DOT
+                if len(dash_numbers) >= 4
+                else MSO_LINE_DASH_STYLE.DASH
+            )
+
+    if not include_fill:
+        return
+    fill = drawing.get("fill")
+    if fill is None:
+        shape.fill.background()
+    else:
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = _pdf_color_to_rgb(fill)
+        _set_powerpoint_opacity(
+            shape._element.spPr.xpath("./a:solidFill/a:srgbClr"),
+            drawing.get("fill_opacity"),
+        )
+
+
+def _points_match(first, second, tolerance: float = 0.1) -> bool:
+    return abs(first.x - second.x) <= tolerance and abs(first.y - second.y) <= tolerance
+
+
+def _cubic_points(start, control_one, control_two, end, steps: int = 16) -> list[fitz.Point]:
+    points = []
+    for index in range(1, steps + 1):
+        t = index / steps
+        inverse = 1 - t
+        points.append(
+            fitz.Point(
+                inverse ** 3 * start.x
+                + 3 * inverse * inverse * t * control_one.x
+                + 3 * inverse * t * t * control_two.x
+                + t ** 3 * end.x,
+                inverse ** 3 * start.y
+                + 3 * inverse * inverse * t * control_one.y
+                + 3 * inverse * t * t * control_two.y
+                + t ** 3 * end.y,
+            )
+        )
+    return points
+
+
+def _drawing_contours(items: list[tuple]) -> list[list[fitz.Point]] | None:
+    contours: list[list[fitz.Point]] = []
+
+    def add_segment(start: fitz.Point, following: list[fitz.Point]) -> None:
+        if not contours or not _points_match(contours[-1][-1], start):
+            contours.append([fitz.Point(start)])
+        contours[-1].extend(fitz.Point(point) for point in following)
+
+    for item in items:
+        kind = item[0]
+        if kind == "l":
+            add_segment(item[1], [item[2]])
+        elif kind == "c":
+            add_segment(item[1], _cubic_points(item[1], item[2], item[3], item[4]))
+        elif kind == "re":
+            rect = item[1]
+            contours.append(
+                [
+                    fitz.Point(rect.x0, rect.y0),
+                    fitz.Point(rect.x1, rect.y0),
+                    fitz.Point(rect.x1, rect.y1),
+                    fitz.Point(rect.x0, rect.y1),
+                    fitz.Point(rect.x0, rect.y0),
+                ]
+            )
+        elif kind == "qu":
+            quad = item[1]
+            contours.append([quad.ul, quad.ur, quad.lr, quad.ll, quad.ul])
+        else:
+            return None
+    return [contour for contour in contours if len(contour) > 1]
+
+
+def _add_drawing_fallback(slide, page, drawing: dict, to_emu_x, to_emu_y) -> None:
+    rect = fitz.Rect(drawing.get("rect") or page.rect) & page.rect
+    if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=True)
+    left, top = to_emu_x(rect.x0), to_emu_y(rect.y0)
+    width, height = to_emu_x(rect.x1) - left, to_emu_y(rect.y1) - top
+    if width > 0 and height > 0:
+        slide.shapes.add_picture(BytesIO(pixmap.tobytes("png")), left, top, width=width, height=height)
+
+
+def _add_powerpoint_drawing(slide, page, drawing: dict, scale: float, offset_x: float, offset_y: float, to_emu_x, to_emu_y) -> None:
+    items = drawing.get("items") or []
+    if len(items) == 1 and items[0][0] == "re":
+        rect = items[0][1]
+        left, top = to_emu_x(rect.x0), to_emu_y(rect.y0)
+        width, height = to_emu_x(rect.x1) - left, to_emu_y(rect.y1) - top
+        if width > 0 and height > 0:
+            shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, left, top, width, height)
+            _style_powerpoint_shape(shape, drawing, scale)
+        return
+
+    if drawing.get("fill") is None and items and all(item[0] == "l" for item in items):
+        for _, start, end in items:
+            connector = slide.shapes.add_connector(
+                MSO_CONNECTOR.STRAIGHT,
+                to_emu_x(start.x),
+                to_emu_y(start.y),
+                to_emu_x(end.x),
+                to_emu_y(end.y),
+            )
+            _style_powerpoint_shape(connector, drawing, scale, include_fill=False)
+        return
+
+    contours = _drawing_contours(items)
+    if not contours:
+        _add_drawing_fallback(slide, page, drawing, to_emu_x, to_emu_y)
+        return
+
+    coordinate_scale = EMU_PER_POINT * scale
+    builder = slide.shapes.build_freeform(contours[0][0].x, contours[0][0].y, scale=coordinate_scale)
+    for index, contour in enumerate(contours):
+        if index:
+            builder.move_to(contour[0].x, contour[0].y)
+        closed = _points_match(contour[0], contour[-1]) or bool(drawing.get("closePath")) or drawing.get("fill") is not None
+        vertices = contour[1:-1] if closed and _points_match(contour[0], contour[-1]) else contour[1:]
+        builder.add_line_segments([(point.x, point.y) for point in vertices], close=closed)
+    shape = builder.convert_to_shape(origin_x=Emu(int(offset_x)), origin_y=Emu(int(offset_y)))
+    _style_powerpoint_shape(shape, drawing, scale)
+
+
+def _add_powerpoint_image(slide, image: bytes, left: int, top: int, width: int, height: int) -> None:
+    try:
+        slide.shapes.add_picture(BytesIO(image), left, top, width=width, height=height)
+        return
+    except Exception:
+        pass
+
+    from PIL import Image
+
+    picture = Image.open(BytesIO(image))
+    if picture.mode not in ("RGB", "RGBA"):
+        picture = picture.convert("RGBA" if "transparency" in picture.info else "RGB")
+    normalized = BytesIO()
+    picture.save(normalized, format="PNG")
+    normalized.seek(0)
+    slide.shapes.add_picture(normalized, left, top, width=width, height=height)
+
+
+def _add_editable_slide(presentation, page, slide_w_emu: int, slide_h_emu: int) -> None:
+    """Reconstruct a PDF page using editable text, images, and vector shapes.
+
+    PDF drawing commands have no chart semantics, so charts become editable
+    PowerPoint shapes rather than native chart objects. Unknown drawing commands
+    are retained as clipped raster fallbacks instead of disappearing.
+    """
+
+    blank_layout = presentation.slide_layouts[6]
+    slide = presentation.slides.add_slide(blank_layout)
+
+    page_w = page.rect.width or 1
+    page_h = page.rect.height or 1
+    scale = min(slide_w_emu / (page_w * EMU_PER_POINT), slide_h_emu / (page_h * EMU_PER_POINT))
+    offset_x = (slide_w_emu - page_w * EMU_PER_POINT * scale) / 2
+    offset_y = (slide_h_emu - page_h * EMU_PER_POINT * scale) / 2
+
+    def to_emu_x(value: float) -> int:
+        return int(offset_x + value * EMU_PER_POINT * scale)
+
+    def to_emu_y(value: float) -> int:
+        return int(offset_y + value * EMU_PER_POINT * scale)
+
+    data = page.get_text("dict")
+
+    # Put raster content at the back, followed by vectors and editable text.
+    for block in data["blocks"]:
+        if block.get("type") != 1 or "image" not in block:
+            continue
+        x0, y0, x1, y1 = block["bbox"]
+        width = to_emu_x(x1) - to_emu_x(x0)
+        height = to_emu_y(y1) - to_emu_y(y0)
+        if width <= 0 or height <= 0:
+            continue
+        _add_powerpoint_image(slide, block["image"], to_emu_x(x0), to_emu_y(y0), width, height)
+
+    for drawing in page.get_drawings():
+        _add_powerpoint_drawing(slide, page, drawing, scale, offset_x, offset_y, to_emu_x, to_emu_y)
+
+    for block in data["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = [span for span in line.get("spans", []) if span.get("text", "").strip()]
+            if not spans:
+                continue
+            x0, y0, x1, y1 = line["bbox"]
+            left, top = to_emu_x(x0), to_emu_y(y0)
+            width = max(to_emu_x(x1) - left, Emu(1))
+            height = max(to_emu_y(y1) - top, Emu(1))
+            textbox = slide.shapes.add_textbox(left, top, width, height)
+            frame = textbox.text_frame
+            frame.word_wrap = False
+            frame.vertical_anchor = MSO_ANCHOR.TOP
+            frame.margin_left = frame.margin_right = 0
+            frame.margin_top = frame.margin_bottom = 0
+            paragraph = frame.paragraphs[0]
+            for span in spans:
+                run = paragraph.add_run()
+                run.text = span["text"]
+                run.font.size = Pt(max(span.get("size", 12) * scale, 1))
+                run.font.color.rgb = _pdf_int_color_to_rgb(int(span.get("color", 0)))
+                flags = span.get("flags", 0)
+                run.font.bold = bool(flags & 16)
+                run.font.italic = bool(flags & 2)
+                fontname = (span.get("font") or "").split("+")[-1]
+                if fontname:
+                    run.font.name = fontname
+
+
 def pdf_to_powerpoint(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
-    dpi = int(options.get("dpi") or 160)
+    editable = (options.get("pptx_mode") or "editable") != "image"
     document = fitz.open(source)
-    presentation = Presentation()
-    presentation.slide_width = Inches(11)
-    presentation.slide_height = Inches(8.5)
-    blank_layout = presentation.slide_layouts[6]
-    for index, page in enumerate(document, start=1):
-        image_path = output.parent / f"slide_{index}.png"
-        page.get_pixmap(dpi=dpi).save(image_path)
-        slide = presentation.slides.add_slide(blank_layout)
-        slide.shapes.add_picture(str(image_path), 0, 0, width=presentation.slide_width, height=presentation.slide_height)
-        image_path.unlink(missing_ok=True)
-    document.close()
-    presentation.save(output)
+    try:
+        presentation = Presentation()
+        first = document[0].rect if len(document) else fitz.Rect(0, 0, 792, 612)
+        presentation.slide_width = Emu(min(int(first.width * EMU_PER_POINT), Inches(56)))
+        presentation.slide_height = Emu(min(int(first.height * EMU_PER_POINT), Inches(56)))
+        if editable:
+            for page in document:
+                _add_editable_slide(presentation, page, presentation.slide_width, presentation.slide_height)
+        else:
+            dpi = int(options.get("dpi") or 160)
+            blank_layout = presentation.slide_layouts[6]
+            for page in document:
+                slide = presentation.slides.add_slide(blank_layout)
+                page_image = BytesIO(page.get_pixmap(dpi=dpi, alpha=False).tobytes("png"))
+                slide.shapes.add_picture(page_image, 0, 0, width=presentation.slide_width, height=presentation.slide_height)
+        presentation.save(output)
+    finally:
+        document.close()
     return output
 
 
@@ -938,11 +1292,61 @@ def powerpoint_to_pdf(files: list[Path], output: Path, options: dict) -> Path:
     return _office_to_pdf(files, output, POWERPOINT_EXTENSIONS, "PowerPoint")
 
 
+def _ocrmypdf_command() -> list[str]:
+    """Prefer the standalone ocrmypdf executable, but fall back to running it via the
+    current Python interpreter. The service process often lacks the venv's Scripts on
+    PATH, so `-m ocrmypdf` guarantees the installed package is always reachable."""
+    binary = shutil.which("ocrmypdf")
+    if binary:
+        return [binary]
+    try:
+        import ocrmypdf  # noqa: F401
+    except ImportError as exc:
+        raise OperationError(
+            "OCR is not installed on the server. Install it with: pip install ocrmypdf"
+        ) from exc
+    return [sys.executable, "-m", "ocrmypdf"]
+
+
+def _ocr_environment() -> dict:
+    """ocrmypdf shells out to Tesseract and Ghostscript. Add their locations to PATH so
+    OCR works even when the service process was not started from an activated shell."""
+    env = dict(os.environ)
+    extra_dirs = []
+    for names in (("tesseract",), ("gswin64c", "gswin32c", "gs")):
+        try:
+            extra_dirs.append(str(Path(resolve_binary(*names)).parent))
+        except OperationError:
+            pass
+    if extra_dirs:
+        env["PATH"] = os.pathsep.join(extra_dirs + [env.get("PATH", "")])
+    return env
+
+
 def ocr_pdf(files: list[Path], output: Path, options: dict) -> Path:
     source = single_pdf(files)
-    ocrmypdf = resolve_binary("ocrmypdf")
     language = options.get("language") or "eng"
-    subprocess.run([ocrmypdf, "-l", language, "--skip-text", str(source), str(output)], check=True)
+    command = _ocrmypdf_command()
+    result = subprocess.run(
+        [*command, "-l", language, "--skip-text", str(source), str(output)],
+        env=_ocr_environment(),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        lowered = message.lower()
+        if "tesseract" in lowered:
+            raise OperationError(
+                "OCR engine (Tesseract) is not installed or not reachable on the server. "
+                "Install Tesseract-OCR and retry."
+            )
+        if "ghostscript" in lowered or "gswin" in lowered:
+            raise OperationError(
+                "Ghostscript is not installed or not reachable on the server. Install Ghostscript and retry."
+            )
+        last_line = message.splitlines()[-1] if message else "unknown error"
+        raise OperationError(f"OCR failed: {last_line}")
     return output
 
 
